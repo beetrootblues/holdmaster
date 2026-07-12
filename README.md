@@ -1,33 +1,73 @@
 # ✈ HoldMaster — Australian IFR Holding Pattern Calculator
 
-> A publishable iOS sideload-ready app for CASA AIP ENR 1.5 compliant holding calculations.  
-> Built by a CPL candidate. Not for operational use — always cross-reference with current AIP.
+> AU AIP ENR 1.5 / ICAO PANS-OPS compliant. Built for CPL/IREX candidates and IFR pilots.  
+> Not for operational use — always cross-reference with current CASA AIP and DAP charts.
+
+---
+
+## What's New — v1.1.0
+
+| | Feature |
+|---|---|
+| ✈ | **Approach Brief Generator** — NDB · RNP · ILS · VOR verbatim read-back quality brief |
+| ✈ | **Hold Timer** — abeam countdown → inbound count-up with colour cues |
+| ✈ | **Fuel Endurance in Hold** — laps available, endurance, fuel per lap |
+| ✈ | **VDP Calculator** — (MDA−TDZE)÷300 with timing at TAS |
+| ✈ | **ATC Phraseology** crib in Reference tab |
+| ✈ | Sector algorithm fixed for left-hand holds (BFF-mirrored geometry) |
+| ✈ | Wind calculation bug fixed (gsInbound/outbound sign error) |
 
 ---
 
 ## Features
 
-| Feature | Detail |
+| Tab | Feature |
 |---|---|
-| **Holding Calculator** | Inbound track, altitude, category, turn direction, charted/default leg time |
-| **Sector Entry** | Full S1/S2/S3 per AIP ENR 1.5 para 3.4.1 — based on **heading** not track |
-| **Visual Diagram** | Live compass rose with sector wedges, aircraft heading arrow, racetrack oval |
-| **Wind Corrections** | Inbound WCA, outbound triple-WCA, adjusted outbound time, GS estimates |
-| **Max Speed Warnings** | Per ICAO Cat A–E, altitude-aware (≤FL140 / >FL140) |
-| **Memory Bank** | Save holds per airport/fix label; reload with one tap; persistent via `localStorage` |
-| **Reference Tab** | Full AIP ENR 1.5 speed table, sector definitions, Table 1.1 approach speeds |
+| **HOLD** | Inbound/outbound headings, leg timing, speed limits, wind-corrected headings, fuel endurance, hold timer, HOLD CARD kneeboard summary |
+| **SECTORS** | Live compass diagram, S1/S2/S3 sector wedges, aircraft heading overlay, step-by-step procedure |
+| **WIND** | Inbound WCA, outbound triple-WCA, adjusted outbound time, GS estimates |
+| **BRIEF** | NDB/RNP/ILS/VOR approach brief generator — frequencies, navaid, sector entry, check heights, minima, alternate, missed approach, VDP |
+| **MEMORY** | Save/load/delete holds per airport label (localStorage) |
+| **REF** | AIP ENR 1.5 speed tables, sector definitions, ATC phraseology, Table 1.1 approach speeds |
 
 ---
 
-## Australian AIP ENR 1.5 Rules Implemented
+## Approach Brief Generator
+
+Generates a verbatim, read-back quality brief in the format used by Australian IFR operators:
+
+**NDB** — navaid tuning, MSA, sector entry with station passage procedure, hold, outbound/descent track, check heights, MDA/AGL/vis, circling minima, alternate, missed approach  
+**RNP** — GNSS cross-check, IAF/IF/FAF fix names, transition track, check height table, LNAV and LNAV+VNAV minima  
+**ILS** — ILS freq/ident, G/S and LOC fail actions, check heights, DA/AGL/vis, LOC-only minima, outside-TWR-hours missed approach  
+**VOR** — VOR tuning, outbound track/time, stabilised note, check heights, MDA with/without ATIS, VOR fail action  
+
+All types include auto-derived sector entry from heading inputs, outbound timing (TW/nil wind/HW seconds), and VDP for non-precision approaches.
+
+---
+
+## Australian AIP ENR 1.5 Rules
 
 ### Leg Timing
-- **≤ FL140**: 1 minute outbound (or published DME)
-- **> FL140**: 1.5 minutes outbound (or published DME)
-- **Sector 2 (offset)**: max 1.5 min *even if* the chart shows 1 min
+- **≤ FL140**: 1 minute outbound
+- **> FL140**: 1.5 minutes outbound  
+- **Sector 2 (offset)**: max 1.5 min regardless of chart timing
 
-### Max Holding Speeds (ICAO PANS-OPS / AU AIP)
-| Cat | Vat | ≤ FL140 | > FL140 |
+### Sector Entry Algorithm
+Using bearing-from-fix (BFF) relative to outbound direction, mirrored for left holds:
+
+```
+Right hold: rel = norm(bearingFromFix − outbound)      [CW]
+Left hold:  rel = norm(outbound − bearingFromFix)      [CCW, mirrored]
+
+S3 (Direct):   rel ∈ [0°,   110°]   — 110° arc
+S1 (Parallel): rel ∈ (110°, 290°]   — 180° arc
+S2 (Offset):   rel ∈ (290°, 360°)   —  70° arc
+```
+
+Entry is based on **aircraft heading at the fix**, not ground track. (AIP ENR 1.5 para 3.4.1)
+
+### Max Holding Speeds
+| Cat | Vat | ≤FL140 | >FL140 |
 |---|---|---|---|
 | A | ≤90kt | 170 KIAS | 170 KIAS |
 | B | 91–120kt | 170 KIAS | 220 KIAS |
@@ -35,68 +75,38 @@
 | D | 141–165kt | 230 KIAS | 240 KIAS |
 | E | 166–210kt | 230 KIAS | 240 KIAS |
 
-### Sector Entry Algorithm
-Sectors defined by **bearing from the fix** relative to the **outbound direction**:
-
-```
-For right-hand hold, outbound = inbound + 180°:
-  S3 (Direct):   bearing [outbound,     outbound+110°]  CW  → 110° arc
-  S1 (Parallel): bearing [outbound+110, outbound+290°]  CW  → 180° arc  
-  S2 (Offset):   bearing [outbound+290, outbound+360°]  CW  → 70°  arc
-```
-
-For **left-hand** holds, the arcs mirror (CCW direction).  
-Entry based on **aircraft heading at the fix**, not ground track. (ENR 1.5 para 3.4.1)
-
-### Sector 2 — Offset Heading
-30° from outbound toward the **holding side**:
-- Right hold: `offset = outbound − 30°`
-- Left hold:  `offset = outbound + 30°`
-
 ---
 
-## Sideloading on iPhone (No Mac Required)
+## Sideloading on iPhone
 
-### Method 1: SideStore (recommended)
-1. Install [SideStore](https://sidestore.io) on your iPhone
-2. Add `HoldMaster.ipa` from this repo's [Releases](../../releases)
-3. Sideload and trust the developer certificate
+### SideStore (recommended — no PC needed after setup)
+1. Install [SideStore](https://sidestore.io)
+2. Add `HoldMaster.ipa` from [Releases](../../releases)
+3. Trust the certificate in Settings → General → VPN & Device Management
 
-### Method 2: LiveContainer
+### LiveContainer (no signing required)
 1. Install [LiveContainer](https://github.com/khanhduytran0/LiveContainer)
-2. Copy `HoldMaster.ipa` to your LiveContainer apps folder
+2. Copy `HoldMaster.ipa` to LiveContainer's apps folder
 3. Launch from LiveContainer
 
-### Method 3: AltStore
-1. Install [AltStore](https://altstore.io) (requires PC/Mac for initial setup)
+### AltStore
+1. Install [AltStore](https://altstore.io)
 2. Sideload `HoldMaster.ipa` via AltStore
 
-### Method 4: Add to Home Screen (PWA — no sideload needed)
-If you just want it as an app icon without sideloading:
-1. Clone this repo and run locally, OR deploy to any static host
-2. Open in Safari on iPhone → Share → **Add to Home Screen**
-3. Full offline support via service worker
+### PWA (no sideload — add to Home Screen)
+Open in Safari → Share → **Add to Home Screen** → full offline support via service worker.
 
 ---
 
 ## Build from Source
 
 ```bash
-# Install dependencies
 npm install
-
-# Development server
-npm run dev
-
-# Production build
-npm run build
-
-# The built files are in dist/ — sideload-ready IPA is in the repo Releases
+npm run dev      # dev server
+npm run build    # production build → dist/
 ```
 
-### Requirements
-- Node.js ≥ 18
-- npm ≥ 9
+Node.js ≥ 18 required.
 
 ---
 
@@ -105,40 +115,24 @@ npm run build
 ```
 holdmaster/
 ├── src/
-│   ├── App.jsx          # Main app (all logic + UI, ~1200 lines)
-│   └── main.jsx         # React entry point
+│   ├── App.jsx          # Full app — 1500+ lines, all logic + UI
+│   ├── main.jsx
+│   └── index.css
 ├── public/
 │   ├── manifest.json    # PWA manifest
-│   └── icon-*.png       # App icons
-├── index.html           # iOS PWA meta tags, safe-area CSS
-├── vite.config.js       # Vite + PWA plugin config
-├── capacitor.config.ts  # iOS app metadata
-├── HoldMaster.ipa       # Pre-built IPA for sideloading
-└── HoldingCalc.jsx      # Standalone React component (importable)
+│   └── icon-*.png
+├── index.html           # iOS PWA meta tags + safe-area CSS
+├── vite.config.js       # Vite + PWA plugin
+├── capacitor.config.ts  # iOS native build config
+└── HoldMaster.ipa       # Pre-built IPA
 ```
-
----
-
-## Tabs
-
-| Tab | Purpose |
-|---|---|
-| **CALCULATOR** | Enter all hold params; get timing, speed limits, warnings |
-| **SECTOR ENTRY** | Interactive diagram with live aircraft heading overlay |
-| **WIND** | WCA, triple-WCA, adjusted outbound time, GS |
-| **MEMORY** | Save/load/delete holds by airport label |
-| **REFERENCE** | Full AIP ENR 1.5 speed tables and rules |
 
 ---
 
 ## Legal
 
-Not approved for operational use. Always verify against current CASA AIP, relevant DAP charts, and aircraft Flight Manual.  
-AIP ENR 1.5 © Airservices Australia.
-
----
+Not approved for operational use. Always verify against current CASA AIP, DAP charts, and your aircraft's Flight Manual. AIP ENR 1.5 © Airservices Australia.
 
 ## Author
 
-Built for personal CPL/IREX study.  
-Corrections welcome via Issues.
+CPL candidate, Moorabbin. Corrections welcome via Issues.

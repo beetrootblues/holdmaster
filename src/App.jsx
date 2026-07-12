@@ -1,6 +1,9 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 
-// ─── AU AIP ENR 1.5 / ICAO PANS-OPS Speed Table ─────────────────────────────
+// ─── Version ──────────────────────────────────────────────────────────────────
+const VERSION = "1.1.0";
+
+// ─── AU AIP ENR 1.5 / ICAO PANS-OPS Speed Table ──────────────────────────────
 const ICAO_CATS = {
   A: { label: "Cat A", vatRange: "≤90kt", maxBelow14k: 170, maxAbove14k: 170 },
   B: { label: "Cat B", vatRange: "91–120kt", maxBelow14k: 170, maxAbove14k: 220 },
@@ -9,70 +12,49 @@ const ICAO_CATS = {
   E: { label: "Cat E", vatRange: "166–210kt", maxBelow14k: 230, maxAbove14k: 240 },
 };
 
-// ─── Core maths ──────────────────────────────────────────────────────────────
+// ─── Core maths ───────────────────────────────────────────────────────────────
 const norm = (a) => ((a % 360) + 360) % 360;
 
 function getSectorEntry(acHdg, inboundTrack, turnDir) {
-  // Correct ICAO / AU AIP ENR 1.5 sector algorithm:
-  // Sectors defined by bearing FROM fix (= acHdg + 180), relative to outbound direction.
-  // For right hold:  S3=[outbound,+110°], S1=[+110°,+290°], S2=[+290°,+360°]
-  // For left hold:   S3=[outbound-110°,outbound], S1=[outbound-290°,outbound-110°], S2=[outbound-290°,outbound] reversed
   const outbound = norm(inboundTrack + 180);
   const bearingFromFix = norm(acHdg + 180);
-  const sign = turnDir === "R" ? 1 : -1;
-  const rel = norm((bearingFromFix - outbound) * sign);
-
-  const offsetHeading =
-    turnDir === "R"
-      ? norm(outbound - 30)   // 30° CCW (holding/left side for right hold)
-      : norm(outbound + 30);  // 30° CW (holding/right side for left hold)
-
-  if (rel <= 110) {
-    return {
-      sector: 3,
-      name: "Sector 3 — Direct Entry",
-      color: "#4CAF82",
-      bgColor: "#0D2D1C",
-      borderColor: "#4CAF82",
-      procedure: [
-        `Cross the fix and turn immediately ${turnDir === "R" ? "RIGHT" : "LEFT"} (holding side).`,
-        `Fly outbound on ${norm(inboundTrack + 180)}°M for the published time/DME.`,
-        `Turn ${turnDir === "R" ? "RIGHT" : "LEFT"} onto the inbound track ${norm(inboundTrack)}°M.`,
-        `Establish inbound and cross the fix to commence the hold.`,
-      ],
-      badge: "S3 · DIRECT",
-    };
-  }
-  if (rel <= 290) {
-    return {
-      sector: 1,
-      name: "Sector 1 — Parallel Entry",
-      color: "#5B9FD8",
-      bgColor: "#1B2D45",
-      borderColor: "#5B9FD8",
-      procedure: [
-        `Cross the fix and turn to fly PARALLEL to the inbound (${norm(inboundTrack)}°M) on the NON-HOLDING side.`,
-        `Fly outbound parallel for the published time/distance.`,
-        `Turn ${turnDir === "R" ? "LEFT" : "RIGHT"} (into holding side) through MORE than 180° to intercept inbound.`,
-        `Track inbound ${norm(inboundTrack)}°M to the fix.`,
-      ],
-      badge: "S1 · PARALLEL",
-    };
-  }
+  // BFF-mirrored: CW for right hold, CCW for left hold (mirrors the pattern geometry)
+  const rel = turnDir === "R"
+    ? norm(bearingFromFix - outbound)   // CW from outbound
+    : norm(outbound - bearingFromFix);  // CCW from outbound (mirrored for left hold)
+  const offsetHeading = turnDir === "R" ? norm(outbound - 30) : norm(outbound + 30);
+  if (rel <= 110) return {
+    sector: 3, name: "Sector 3 — Direct Entry", badge: "S3 · DIRECT",
+    color: "#3DAF76", bgColor: "#0D2D1C", borderColor: "#3DAF76",
+    offsetHeading,
+    procedure: [
+      `Cross the fix and turn immediately ${turnDir === "R" ? "RIGHT" : "LEFT"} (holding side).`,
+      `Fly outbound on ${norm(inboundTrack + 180)}°M for the published time/DME.`,
+      `Turn ${turnDir === "R" ? "RIGHT" : "LEFT"} onto inbound track ${norm(inboundTrack)}°M.`,
+      `Establish inbound and cross the fix to commence the hold.`,
+    ],
+  };
+  if (rel <= 290) return {
+    sector: 1, name: "Sector 1 — Parallel Entry", badge: "S1 · PARALLEL",
+    color: "#4D8FC9", bgColor: "#1B2D45", borderColor: "#4D8FC9",
+    offsetHeading,
+    procedure: [
+      `Cross the fix and turn to fly PARALLEL to the inbound (${norm(inboundTrack)}°M) on the NON-HOLDING side.`,
+      `Fly outbound parallel for the published time/distance.`,
+      `Turn ${turnDir === "R" ? "LEFT" : "RIGHT"} through MORE than 180° to intercept inbound.`,
+      `Track inbound ${norm(inboundTrack)}°M to the fix.`,
+    ],
+  };
   return {
-    sector: 2,
-    name: "Sector 2 — Offset Entry",
-    color: "#F5A623",
-    bgColor: "#3A2800",
-    borderColor: "#F5A623",
+    sector: 2, name: "Sector 2 — Offset Entry", badge: "S2 · OFFSET",
+    color: "#E8A020", bgColor: "#3A2800", borderColor: "#E8A020",
+    offsetHeading,
     procedure: [
       `Cross the fix and turn to fly offset heading ${offsetHeading}°M (30° from outbound toward holding side).`,
       `Fly offset for up to the published time (max 1.5 min even if chart shows 1 min — AIP ENR 1.5).`,
       `Turn ${turnDir === "R" ? "RIGHT" : "LEFT"} to intercept inbound track ${norm(inboundTrack)}°M.`,
       `Establish inbound and cross fix.`,
     ],
-    offsetHeading,
-    badge: "S2 · OFFSET",
   };
 }
 
@@ -87,18 +69,17 @@ function getLegTimeSecs(altFt, chartedMin) {
 }
 
 function fmtTime(secs) {
-  const m = Math.floor(secs / 60);
-  const s = secs % 60;
+  const m = Math.floor(Math.abs(secs) / 60);
+  const s = Math.abs(secs) % 60;
   return `${m}:${String(s).padStart(2, "0")}`;
 }
 
 function calcWind(inbTrack, windDir, windSpd, tas) {
   const inbRad = (inbTrack * Math.PI) / 180;
   const wRad = (windDir * Math.PI) / 180;
-  const hw = windSpd * Math.cos(wRad - inbRad);
+  const hw = windSpd * Math.cos(wRad - inbRad); // positive = tailwind on inbound
   const xw = windSpd * Math.sin(wRad - inbRad);
   const wcaDeg = Math.round(Math.atan2(xw, tas) * (180 / Math.PI));
-  // hw positive = wind component in same direction as inbound track = tailwind → increases GS
   const gsInbound = Math.round(Math.sqrt(Math.max(0, tas * tas - xw * xw)) + hw);
   return { hw: Math.round(hw), xw: Math.round(xw), wca: wcaDeg, gsInbound };
 }
@@ -107,19 +88,169 @@ function calcOutboundTime(inbTrack, windDir, windSpd, tas, stdLegSecs) {
   const outbTrack = norm(inbTrack + 180);
   const outbRad = (outbTrack * Math.PI) / 180;
   const wRad = (windDir * Math.PI) / 180;
-  const hwOut = windSpd * Math.cos(wRad - outbRad);
+  const hwOut = windSpd * Math.cos(wRad - outbRad); // positive = tailwind on outbound
   const xw = windSpd * Math.sin(wRad - outbRad);
-  // hwOut positive = tailwind on outbound. gsOut benefits; gsIn is opposite (headwind on inbound).
   const spd = Math.sqrt(Math.max(1, tas * tas - xw * xw));
-  const gsOut = spd + hwOut;  // TW on outbound adds to GS
-  const gsIn  = spd - hwOut;  // TW on outbound = HW on inbound, reduces inbound GS
+  const gsOut = spd + hwOut;
+  const gsIn  = spd - hwOut;
   if (gsIn <= 0) return { secs: stdLegSecs, note: "GS too low" };
   const distNM = (stdLegSecs / 3600) * gsIn;
   const outSecs = Math.round((distNM / gsOut) * 3600);
   return { secs: outSecs, distNM: distNM.toFixed(2), gsIn: Math.round(gsIn), gsOut: Math.round(gsOut) };
 }
 
-// ─── Colour system ────────────────────────────────────────────────────────────
+// ─── Approach Brief Generator ─────────────────────────────────────────────────
+function generateBrief(b, sectorEntry, windCalc) {
+  const lines = [];
+  const icao  = b.icao?.toUpperCase() || "????";
+  const name  = b.aeroName || icao;
+  const type  = b.approachType || "NDB";
+  const rwy   = b.runway || "??";
+  const date  = b.chartDate || "??";
+  const ob    = norm((parseInt(b.holdInbound) || 0) + 180);
+
+  // Sector entry spoken sentence
+  const inb      = parseInt(b.holdInbound) || 0;
+  const acH      = parseInt(b.acHdgAtFix) || 0;
+  const turnDir  = b.holdTurnDir || "L";
+  const outbOB   = norm(inb + 180);
+  const legLabel = b.holdAlt && parseInt(b.holdAlt) / 100 > 140 ? "1 min 30 seconds" : "1 minute";
+
+  // TW / nil / HW outbound timing
+  const twSecs  = b.twSecs  || "5";
+  const nilSecs = b.nilSecs || "15";
+  const hwSecs  = b.hwSecs  || "20";
+
+  // --- Header ---
+  lines.push(`${name} ${type} Chart Brief`);
+  lines.push(`${"─".repeat(50)}`);
+
+  // --- What we're doing ---
+  lines.push(`• We're doing: ${icao} ${type} RWY ${rwy}, dated ${date}`);
+
+  // --- Frequencies ---
+  if (b.freqs?.length) {
+    const fStr = b.freqs.filter(f => f.label && f.freq).map(f => `${f.label}: ${f.freq}`).join(" | ");
+    lines.push(`• Frequencies have been set (${fStr})`);
+  }
+
+  // --- Navaid ---
+  if (type === "NDB") {
+    lines.push(`• NDB has been tuned for ${b.ndbFreq || "???"} | ${b.ndbIdent || "???"}`);
+  } else if (type === "ILS") {
+    lines.push(`• ILS has been tuned, tested and identified for ${b.ilsFreq || "???"} | ${b.ilsIdent || "???"}`);
+  } else if (type === "VOR") {
+    lines.push(`• VOR has been tuned, tested and identified for ${b.vorFreq || "???"} | ${b.vorIdent || "???"}`);
+  } else if (type === "RNP") {
+    lines.push(`• RNP approach has been programmed and cross-checked in the GNSS unit`);
+  }
+
+  // --- MSA / Elevation ---
+  lines.push(`• ${b.msaDist || "10"}NM MSA is ${b.msa || "???"}ft, Aerodrome Elevation is ${b.aeroElev || "???"}ft`);
+
+  // --- Sector Entry ---
+  const se = sectorEntry || (b.acHdgAtFix ? getSectorEntry(acH, inb, turnDir) : null);
+  if (se) {
+    if (type === "RNP") {
+      const iaf = b.iafFix || "the IAF";
+      lines.push(`• In the event of a Sector Entry [I will OBS the GNS Flight Plan]: Tracking inbound ${b.acHdgAtFix || "???"}° to the ${iaf}, I will execute a ${se.name}. Upon station passage, I will turn to ${outbOB}°, and push out for either ${twSecs}s (TW), ${nilSecs}s (nil wind) or ${hwSecs}s (HW), then turn ${turnDir === "L" ? "right" : "left"} to ${inb}° (uncorrected for wind).`);
+    } else if (type === "ILS") {
+      const iafFix = b.iafFix || "the IAF";
+      lines.push(`• In the event of a Sector Entry: Tracking via ${b.acHdgAtFix || "???"}° to ${iafFix}, I will execute a ${se.name}. Upon station passage at ${iafFix}, I will turn to an outbound heading of ${outbOB}° for ${twSecs}s / ${nilSecs}s / ${hwSecs}s, then make a ${turnDir === "R" ? "right" : "left"} turn to ${se.sector === 2 ? se.offsetHeading : outbOB}° outbound CRS. After ${b.holdLeg || "1 minute"} Std Hold, I'll turn ${turnDir === "R" ? "right" : "left"} to track ${inb}° inbound CRS towards ${iafFix}.`);
+    } else {
+      // NDB / VOR
+      let entryText = "";
+      if (se.sector === 1) {
+        entryText = `Upon station passage, I will turn to track ${outbOB}° outbound for ${nilSecs} seconds, then ${turnDir === "R" ? "left" : "right"} onto ${se.offsetHeading}°, and back ${inb}° inbound.`;
+      } else if (se.sector === 2) {
+        entryText = `Upon station passage, I will turn slightly ${turnDir === "R" ? "right" : "left"} to ${se.offsetHeading}°, push out for ${b.s2OutboundTime || "1 minute 15 seconds"}, and then turn ${turnDir === "R" ? "left" : "right"} to ${inb}°. Upon attaining station passage again, I will turn ${turnDir === "R" ? "left" : "right"}, and fly ${inb}° uncorrected.`;
+      } else {
+        entryText = `Upon station passage, I will turn to ${outbOB}°, and push out for either ${twSecs}s (TW), ${nilSecs}s (nil wind) or ${hwSecs}s (HW), then turn ${turnDir === "R" ? "right" : "left"} to ${inb}° (uncorrected).`;
+      }
+      lines.push(`• In the event of a Sector Entry: ${b.approachDesc || `I will be flying in at ${b.acHdgAtFix || "???"}°`}, I will execute a ${se.name}. ${entryText}`);
+    }
+  }
+
+  // --- Holding Pattern ---
+  const turnLabel = turnDir === "L" ? "non-standard left turn" : "standard right turn";
+  const holdFix = b.holdFix || (type === "NDB" ? b.ndbIdent : type === "VOR" ? `${b.vorIdent || "???"} VOR` : b.iafFix || "the fix");
+  lines.push(`• Holding pattern${b.holdFix ? ` at ${holdFix}` : ""} is ${turnLabel}, inbound ${inb}°, minimum altitude of ${b.holdAlt || "???"}ft.`);
+
+  // --- Procedure Track / Descent ---
+  if (type === "NDB") {
+    lines.push(`• Upon completion of the hold, I plan to fly ${b.outboundTrack || outbOB}° outbound for ${b.outboundTime || "???"}${b.outboundTime ? " minutes" : ""} descending from ${b.descentFrom || "???"}ft to at or above ${b.descentTo || "???"}ft. I will then make a ${b.finalTurnDir || "right"} turn to track ${b.finalInbound || "???"}° inbound towards the runway.`);
+    if (b.checkHeights?.length && b.checkHeights[0].alt) {
+      const chStr = b.checkHeights.map(h => `${h.dist ? h.dist + "NM" : ""} ${h.alt}ft`).filter(x => x.trim()).join(", ");
+      lines.push(`• Check-heights: ${chStr}.`);
+    } else {
+      lines.push(`• Check-heights are not applicable on this approach profile, just to maintain ${b.descentRate || "500"}fpm descent rate.`);
+    }
+    lines.push(`• I will continue my descent down to an MDA of ${b.mda || "???"}ft (${b.mdaAgl || "???"}ft AGL), with ${b.visibility || "???"}km visibility.${b.circlingMda ? ` If circling is required, MDA is ${b.circlingMda}ft with ${b.circlingVis || "???"}km visibility.` : ""}`);
+  } else if (type === "RNP") {
+    const trans = b.transitionTrack || inb;
+    const transNM = b.transitionNM || "5";
+    const ifFix = b.ifFix || "the IF";
+    const fafFix = b.fafFix || "the FAF";
+    lines.push(`• Upon completion of the hold, I plan to fly the transition track of ${trans}° for ${transNM}NM to ${ifFix} (IF), starting my descent from ${b.descentFrom || "???"}ft to ${b.descentTo || "???"}ft, then turn ${b.finalTurnDir || "right"} to track ${b.finalInbound || "???"}° inbound towards ${fafFix} (FAF). At ${b.gearDist || "0.5"}NM prior to ${fafFix}, I will bring gears down, set ${b.powerConfig || "16'' / 2300 RPM"} to intercept the ${b.descentAngle || "3"}° descent profile.`);
+    if (b.checkHeights?.length && b.checkHeights.some(h => h.alt)) {
+      const first = b.checkHeights[0];
+      const rest  = b.checkHeights.slice(1).filter(h => h.alt);
+      lines.push(`• Check height at ${fafFix} is ${first.alt}ft.${rest.length ? ` Subsequent profile check heights are ${rest.map(h => `${h.dist ? h.dist + "NM" : ""}${h.nmLabel ? ` at ` : " "}${h.alt}ft`).join(", ")}.` : ""}`);
+    }
+    lines.push(`• I will continue my descent down to the LNAV MDA of ${b.lnavMda || "???"}ft${b.lnavMdaAtis ? ` / ${b.lnavMdaAtis}ft` : ""}${b.lnavVis ? ` @ ${b.lnavVis}km VIS` : ""}${b.atisNote ? ` with ${b.atisNote}` : ""}.`);
+    if (b.lnavVnavDa) {
+      lines.push(`• (${b.lnavVnavNote || "If LNAV/VNAV is utilised"}, DA is ${b.lnavVnavDa}ft${b.lnavVnavVis ? ` with ${b.lnavVnavVis}km visibility` : ""}).`);
+    }
+  } else if (type === "ILS") {
+    const iafFix = b.iafFix || "the IAF";
+    const iafDme = b.iafDme ? ` (${b.iafDme} DME)` : "";
+    lines.push(`• Upon completion of the hold, I plan to continue flying ${inb}° inbound with the ILS tuned and GPS set to VLOC. Upon passing ${iafFix}${iafDme} and at half dot high on the glide slope, I will bring gears down, set ${b.powerConfig || "16'' / 2300 RPM"} to intercept the G/S.`);
+    if (b.gsFail) lines.push(`• If G/S fails, we will continue with the localiser approach using check-heights.${b.locFail ? ` If the localiser fails, we will go missed and carry out the ${b.locFail}.` : ""}`);
+    if (b.checkHeights?.length && b.checkHeights.some(h => h.alt)) {
+      const first = b.checkHeights[0];
+      const rest  = b.checkHeights.slice(1).filter(h => h.alt);
+      lines.push(`• Check height at ${first.fix || b.chkFix || "the check point"}${first.dme ? ` / ${first.dme}` : ""} is ${first.alt}ft.${rest.length ? ` Subsequent: ${rest.map(h => `${h.fix||""}${h.dme?"/"+h.dme:""} ${h.alt}ft`).join(", ")}.` : ""}`);
+    }
+    lines.push(`• I will continue my descent down to a DA of ${b.da || "???"}ft (${b.daAgl || "???"}ft AGL), visibility ${b.daVis || "???"}${b.daVisNote ? ` ${b.daVisNote}` : ""}.`);
+    if (b.locOnlyMda) lines.push(`• If we're doing the localiser-only approach, the MDA is ${b.locOnlyMda}ft (${b.locOnlyAgl || "???"}ft AGL), ${b.locOnlyVis || "???"}km visibility.`);
+  } else if (type === "VOR") {
+    lines.push(`• Upon completion of the hold, I plan to track ${b.outboundTrack || outbOB}° outbound${b.catNote ? ` (${b.catNote})` : ""} for ${b.outboundTime || "???"}${b.outboundTime ? " minutes" : ""} while descending from ${b.descentFrom || "???"}ft to at or above ${b.descentTo || "???"}ft. I will then make a ${b.finalTurnDir || "left"} turn inbound to track ${b.finalInbound || "???"}° to establish on the final approach track into ${rwy}.`);
+    if (b.stabilisedNote) lines.push(`• ${b.stabilisedNote}`);
+    if (b.vorFail) lines.push(`• ${b.vorFail}`);
+    if (b.checkHeights?.length && b.checkHeights.some(h => h.alt)) {
+      const chStr = b.checkHeights.map(h => `${h.dist ? h.dist + "NM" : ""} ${h.alt}ft`).filter(x => x.trim()).join(", ");
+      lines.push(`• Check heights: ${chStr}.`);
+    } else {
+      lines.push(`• DME Distance Table / Check heights is not applicable for reference on this plate.`);
+    }
+    lines.push(`• I will continue my descent down to an MDA of ${b.mda || "???"}ft${b.mdaAtis ? `, ${b.mdaAtis}ft with ATIS` : ""}${b.visibility ? `, ${b.visibility}km visibility` : ""}${b.atisNote ? ` which we have today` : ""}.`);
+  }
+
+  // --- Alternate ---
+  if (b.alternateReqd === "no" || !b.alternateReqd) {
+    lines.push(`• Alternate is not required today${b.alternateReason ? ` based on ${b.alternateReason}` : ""}.`);
+  } else {
+    lines.push(`• Alternate is ${b.alternateDest || "required"}.${b.alternateReason ? ` Reason: ${b.alternateReason}.` : ""}`);
+  }
+
+  // --- Missed Approach ---
+  const maTrack  = b.missedTrack || "???";
+  const maAlt    = b.missedAlt   || "???";
+  const maDetail = b.missedDetail || "";
+  if (type === "ILS") {
+    lines.push(`• For a missed approach, I will track ${maTrack}° climbing to ${maAlt}ft.${b.missedOutsideTWR ? ` Outside TWR hours: ${b.missedOutsideTWR}` : ""}${maDetail ? ` ${maDetail}` : ""}`);
+  } else if (type === "RNP") {
+    const maFix = b.missedFix || "";
+    lines.push(`• For a missed approach, I will track ${maFix ? `DCT to ${maFix}, track ` : ""}${maTrack}°, and climb to ${maAlt}ft.${maDetail ? ` ${maDetail}` : ""}`);
+  } else {
+    const maTurn = b.missedTurn || "right";
+    lines.push(`• For a missed approach, I will turn ${maTurn}. Track ${maTrack}°, and climb to ${maAlt}ft.${maDetail ? ` ${maDetail}` : ""}`);
+  }
+
+  return lines.join("\n");
+}
+
+// ─── Colour palette ───────────────────────────────────────────────────────────
 const C = {
   bg:           "#0B0D12",
   surface:      "#131620",
@@ -127,15 +258,16 @@ const C = {
   surfaceHigh:  "#1E2335",
   border:       "#242840",
   borderLight:  "#2E3450",
-  accent:       "#E8A020",   // amber — primary action
+  accent:       "#E8A020",
   accentDim:    "#6B4A10",
-  accentGlow:   "#E8A02022",
   blue:         "#4D8FC9",
   blueDim:      "#1A3050",
   green:        "#3DAF76",
   greenDim:     "#122B1E",
   red:          "#D94F4F",
   redDim:       "#2D1010",
+  purple:       "#9B72CF",
+  purpleDim:    "#2A1A45",
   text:         "#DCE0EC",
   textSub:      "#6E7590",
   textMuted:    "#3E4460",
@@ -144,22 +276,15 @@ const C = {
   s3:           "#3DAF76",
 };
 
-// ─── SVG Holding Pattern Diagram ─────────────────────────────────────────────
+// ─── SVG Holding Diagram ──────────────────────────────────────────────────────
 function HoldDiagram({ inboundTrack, turnDir, sector, acHdg }) {
   const cx = 110, cy = 110, R = 110;
-
   const toXY = (bearingDeg, r) => {
     const a = ((bearingDeg - 90) * Math.PI) / 180;
     return [cx + r * Math.cos(a), cy + r * Math.sin(a)];
   };
-
   const outbound = norm(inboundTrack + 180);
   const sign = turnDir === "R" ? 1 : -1;
-
-  // Sector boundary bearings FROM fix
-  const b1 = norm(outbound + sign * 110);
-  const b2 = norm(outbound + sign * 290);
-
   const arcPath = (startBearing, sweep, r, col, opacity = 0.15) => {
     const steps = Math.max(2, Math.round(sweep / 5));
     const pts = [];
@@ -169,32 +294,12 @@ function HoldDiagram({ inboundTrack, turnDir, sector, acHdg }) {
       pts.push(`${x},${y}`);
     }
     return (
-      <polygon
-        points={`${cx},${cy} ${pts.join(" ")}`}
-        fill={col}
-        fillOpacity={opacity}
-        stroke={col}
-        strokeOpacity={opacity * 1.5}
-        strokeWidth={0.5}
-      />
+      <polygon points={`${cx},${cy} ${pts.join(" ")}`}
+        fill={col} fillOpacity={opacity} stroke={col}
+        strokeOpacity={opacity * 1.5} strokeWidth={0.5} />
     );
   };
-
-  // Draw racetrack
-  const ovalSemiMajor = 45;
-  const ovalSemiMinor = 22;
   const ovalAngleDeg = inboundTrack - 90;
-
-  // fix point (bottom of racetrack)
-  const [fixX, fixY] = toXY(inboundTrack, 32);
-
-  // Heading arrow
-  let acX1, acY1, acX2, acY2;
-  if (acHdg !== null) {
-    [acX1, acY1] = toXY(norm(acHdg + 180), R * 0.5);
-    [acX2, acY2] = toXY(acHdg, R * 0.85);
-  }
-
   return (
     <svg viewBox="0 0 220 220" style={{ width: "100%", maxWidth: 220, display: "block", margin: "0 auto" }}>
       <defs>
@@ -204,127 +309,41 @@ function HoldDiagram({ inboundTrack, turnDir, sector, acHdg }) {
         <marker id="arrowRed" markerWidth="7" markerHeight="7" refX="5" refY="3.5" orient="auto">
           <path d="M0,0 L7,3.5 L0,7 Z" fill="#FF6060" />
         </marker>
-        <filter id="glow">
-          <feGaussianBlur stdDeviation="1.5" result="blur" />
-          <feComposite in="SourceGraphic" in2="blur" operator="over" />
-        </filter>
       </defs>
-
-      {/* Outer ring */}
       <circle cx={cx} cy={cy} r={R - 2} fill={C.surface} />
       <circle cx={cx} cy={cy} r={R - 2} fill="none" stroke={C.border} strokeWidth={1} />
-
-      {/* Compass ticks */}
       {Array.from({ length: 36 }, (_, i) => {
-        const br = i * 10;
-        const isMajor = br % 30 === 0;
-        const [x1, y1] = toXY(br, R - 8);
-        const [x2, y2] = toXY(br, R - (isMajor ? 18 : 13));
+        const br = i * 10, isMajor = br % 30 === 0;
+        const [x1, y1] = toXY(br, R - 8), [x2, y2] = toXY(br, R - (isMajor ? 18 : 13));
         const labels = { 0: "N", 90: "E", 180: "S", 270: "W" };
         const [lx, ly] = toXY(br, R - 24);
         return (
           <g key={br}>
             <line x1={x1} y1={y1} x2={x2} y2={y2} stroke={isMajor ? C.textSub : C.textMuted} strokeWidth={isMajor ? 1.2 : 0.6} />
-            {labels[br] && (
-              <text x={lx} y={ly} textAnchor="middle" dominantBaseline="middle"
-                fontSize="8" fill={C.textSub} fontFamily="monospace" fontWeight="bold">{labels[br]}</text>
-            )}
+            {labels[br] && <text x={lx} y={ly} textAnchor="middle" dominantBaseline="middle" fontSize="8" fill={C.textSub} fontFamily="monospace" fontWeight="bold">{labels[br]}</text>}
           </g>
         );
       })}
-
-      {/* Sector wedges */}
       {arcPath(outbound, 110, R - 30, C.s3)}
       {arcPath(norm(outbound + sign * 110), 180, R - 30, C.s1)}
       {arcPath(norm(outbound + sign * 290), 70, R - 30, C.s2)}
-
-      {/* Active sector highlight */}
       {sector === 3 && arcPath(outbound, 110, R - 30, C.s3, 0.35)}
       {sector === 1 && arcPath(norm(outbound + sign * 110), 180, R - 30, C.s1, 0.35)}
       {sector === 2 && arcPath(norm(outbound + sign * 290), 70, R - 30, C.s2, 0.35)}
-
-      {/* Boundary lines */}
       {[norm(outbound + sign * 110), norm(outbound + sign * 290)].map((br, i) => {
         const [lx, ly] = toXY(br, R - 30);
         return <line key={i} x1={cx} y1={cy} x2={lx} y2={ly} stroke={C.borderLight} strokeWidth={1} strokeDasharray="3 2" />;
       })}
-
-      {/* Outbound direction line */}
-      {(() => {
-        const [ox, oy] = toXY(outbound, R - 30);
-        return <line x1={cx} y1={cy} x2={ox} y2={oy} stroke={C.accent} strokeWidth={1} strokeDasharray="4 3" opacity={0.5} />;
-      })()}
-
-      {/* Racetrack oval */}
+      {(() => { const [ox, oy] = toXY(outbound, R - 30); return <line x1={cx} y1={cy} x2={ox} y2={oy} stroke={C.accent} strokeWidth={1} strokeDasharray="4 3" opacity={0.5} />; })()}
       <g transform={`rotate(${ovalAngleDeg} ${cx} ${cy})`}>
-        <ellipse
-          cx={cx} cy={cy}
-          rx={ovalSemiMinor} ry={ovalSemiMajor}
-          fill="none"
-          stroke={C.accent}
-          strokeWidth={1.8}
-          strokeOpacity={0.8}
-          filter="url(#glow)"
-        />
+        <ellipse cx={cx} cy={cy} rx={22} ry={45} fill="none" stroke={C.accent} strokeWidth={1.8} strokeOpacity={0.8} />
       </g>
-
-      {/* Fix dot */}
-      {(() => {
-        const [fx, fy] = toXY(inboundTrack, ovalSemiMajor - ovalSemiMinor + 2);
-        // approximate fix at bottom of racetrack
-        return (
-          <g>
-            <circle cx={cx} cy={cx} r={3.5} fill={C.accent} opacity={0.9} />
-            <text x={cx} y={cx - 8} textAnchor="middle" fontSize="6.5" fill={C.accent} fontFamily="monospace">FIX</text>
-          </g>
-        );
-      })()}
-
-      {/* Inbound arrow */}
-      {(() => {
-        const [ax, ay] = toXY(norm(inboundTrack + 180), R * 0.55);
-        return (
-          <line x1={ax} y1={ay} x2={cx} y2={cx}
-            stroke={C.accent} strokeWidth={2} markerEnd="url(#arrowAmber)" opacity={0.9} />
-        );
-      })()}
-
-      {/* Aircraft heading arrow */}
-      {acHdg !== null && (() => {
-        const [ax, ay] = toXY(norm(acHdg + 180), R * 0.48);
-        const [bx, by] = toXY(acHdg, R * 0.8);
-        return (
-          <line x1={ax} y1={ay} x2={bx} y2={by}
-            stroke="#FF6060" strokeWidth={2.2} markerEnd="url(#arrowRed)"
-            strokeDasharray="5 2" opacity={0.9} />
-        );
-      })()}
-
-      {/* Sector labels */}
-      {[
-        { br: norm(outbound + sign * 55), label: "S3", col: C.s3 },
-        { br: norm(outbound + sign * 200), label: "S1", col: C.s1 },
-        { br: norm(outbound + sign * 325), label: "S2", col: C.s2 },
-      ].map(({ br, label, col }) => {
-        const [lx, ly] = toXY(br, R * 0.6);
-        return (
-          <text key={label} x={lx} y={ly} textAnchor="middle" dominantBaseline="middle"
-            fontSize="10" fontWeight="bold" fill={col} fontFamily="monospace" opacity={0.85}>
-            {label}
-          </text>
-        );
-      })}
-
-      {/* Inbound track label */}
-      {(() => {
-        const [lx, ly] = toXY(norm(inboundTrack + 180), R * 0.42);
-        return (
-          <text x={lx} y={ly} textAnchor="middle" dominantBaseline="middle"
-            fontSize="7" fill={C.accent} fontFamily="monospace">{norm(inboundTrack)}°M</text>
-        );
-      })()}
-
-      {/* Legend */}
+      <circle cx={cx} cy={cx} r={3.5} fill={C.accent} opacity={0.9} />
+      <text x={cx} y={cx - 8} textAnchor="middle" fontSize="6.5" fill={C.accent} fontFamily="monospace">FIX</text>
+      {(() => { const [ax, ay] = toXY(norm(inboundTrack + 180), R * 0.55); return <line x1={ax} y1={ay} x2={cx} y2={cx} stroke={C.accent} strokeWidth={2} markerEnd="url(#arrowAmber)" opacity={0.9} />; })()}
+      {acHdg !== null && (() => { const [ax, ay] = toXY(norm(acHdg + 180), R * 0.48), [bx, by] = toXY(acHdg, R * 0.8); return <line x1={ax} y1={ay} x2={bx} y2={by} stroke="#FF6060" strokeWidth={2.2} markerEnd="url(#arrowRed)" strokeDasharray="5 2" opacity={0.9} />; })()}
+      {[{ br: norm(outbound + sign * 55), label: "S3", col: C.s3 }, { br: norm(outbound + sign * 200), label: "S1", col: C.s1 }, { br: norm(outbound + sign * 325), label: "S2", col: C.s2 }].map(({ br, label, col }) => { const [lx, ly] = toXY(br, R * 0.6); return <text key={label} x={lx} y={ly} textAnchor="middle" dominantBaseline="middle" fontSize="10" fontWeight="bold" fill={col} fontFamily="monospace" opacity={0.85}>{label}</text>; })}
+      {(() => { const [lx, ly] = toXY(norm(inboundTrack + 180), R * 0.42); return <text x={lx} y={ly} textAnchor="middle" dominantBaseline="middle" fontSize="7" fill={C.accent} fontFamily="monospace">{norm(inboundTrack)}°M</text>; })()}
       <text x={4} y={212} fontSize="6.5" fill="#FF6060" fontFamily="monospace">▶ AC HDG</text>
       <text x={66} y={212} fontSize="6.5" fill={C.accent} fontFamily="monospace">▶ INBOUND</text>
     </svg>
@@ -333,94 +352,622 @@ function HoldDiagram({ inboundTrack, turnDir, sector, acHdg }) {
 
 // ─── Shared UI primitives ─────────────────────────────────────────────────────
 const Label = ({ children }) => (
-  <div style={{ fontSize: 9, letterSpacing: 1.8, color: C.textSub, textTransform: "uppercase", marginBottom: 5, fontFamily: "monospace" }}>
-    {children}
-  </div>
+  <div style={{ fontSize: 9, letterSpacing: 1.8, color: C.textSub, textTransform: "uppercase", marginBottom: 5, fontFamily: "monospace" }}>{children}</div>
 );
-
 const Input = ({ value, onChange, placeholder, type = "number", style = {} }) => (
-  <input
-    type={type}
-    value={value}
-    onChange={onChange}
-    placeholder={placeholder}
-    style={{
-      background: C.bg, border: `1px solid ${C.border}`, borderRadius: 6,
-      color: C.text, padding: "10px 12px", fontSize: 15, fontFamily: "monospace",
-      width: "100%", boxSizing: "border-box", outline: "none",
-      WebkitAppearance: "none", ...style,
-    }}
+  <input type={type} value={value} onChange={onChange} placeholder={placeholder}
+    style={{ background: C.bg, border: `1px solid ${C.border}`, borderRadius: 6, color: C.text, padding: "10px 12px", fontSize: 15, fontFamily: "monospace", width: "100%", boxSizing: "border-box", outline: "none", WebkitAppearance: "none", ...style }}
     onFocus={e => (e.target.style.borderColor = C.accent)}
-    onBlur={e => (e.target.style.borderColor = C.border)}
-  />
+    onBlur={e => (e.target.style.borderColor = C.border)} />
 );
-
-const Select = ({ value, onChange, children }) => (
-  <select
-    value={value}
-    onChange={onChange}
-    style={{
-      background: C.bg, border: `1px solid ${C.border}`, borderRadius: 6,
-      color: C.text, padding: "10px 12px", fontSize: 13, fontFamily: "monospace",
-      width: "100%", boxSizing: "border-box", outline: "none", WebkitAppearance: "none",
-    }}
-  >
+const Select = ({ value, onChange, children, style = {} }) => (
+  <select value={value} onChange={onChange}
+    style={{ background: C.bg, border: `1px solid ${C.border}`, borderRadius: 6, color: C.text, padding: "10px 12px", fontSize: 13, fontFamily: "monospace", width: "100%", boxSizing: "border-box", outline: "none", WebkitAppearance: "none", ...style }}>
     {children}
   </select>
 );
-
 const SegBtn = ({ active, onClick, children }) => (
-  <button
-    onClick={onClick}
-    style={{
-      flex: 1, padding: "10px 6px",
-      background: active ? C.accentDim : C.bg,
-      border: `1px solid ${active ? C.accent : C.border}`,
-      borderRadius: 6, color: active ? C.accent : C.textSub,
-      cursor: "pointer", fontSize: 11, fontFamily: "monospace",
-      fontWeight: active ? 700 : 400, letterSpacing: 1,
-    }}
-  >
+  <button onClick={onClick} style={{ flex: 1, padding: "10px 6px", background: active ? C.accentDim : C.bg, border: `1px solid ${active ? C.accent : C.border}`, borderRadius: 6, color: active ? C.accent : C.textSub, cursor: "pointer", fontSize: 11, fontFamily: "monospace", fontWeight: active ? 700 : 400, letterSpacing: 1 }}>
     {children}
   </button>
 );
-
 const Card = ({ children, style = {} }) => (
-  <div style={{
-    background: C.surface, border: `1px solid ${C.border}`,
-    borderRadius: 10, padding: "14px 14px", marginBottom: 12, ...style
-  }}>
-    {children}
-  </div>
+  <div style={{ background: C.surface, border: `1px solid ${C.border}`, borderRadius: 10, padding: "14px 14px", marginBottom: 12, ...style }}>{children}</div>
 );
-
 const CardTitle = ({ icon, children }) => (
-  <div style={{
-    fontSize: 9, letterSpacing: 2.5, color: C.textSub, textTransform: "uppercase",
-    marginBottom: 12, display: "flex", alignItems: "center", gap: 7, fontFamily: "monospace",
-  }}>
-    <span style={{ color: C.accent, fontSize: 11 }}>{icon}</span>
-    {children}
+  <div style={{ fontSize: 9, letterSpacing: 2.5, color: C.textSub, textTransform: "uppercase", marginBottom: 12, display: "flex", alignItems: "center", gap: 7, fontFamily: "monospace" }}>
+    <span style={{ color: C.accent, fontSize: 11 }}>{icon}</span>{children}
   </div>
 );
-
 const DataRow = ({ label, value, valueColor = C.text, large = false }) => (
-  <div style={{
-    display: "flex", justifyContent: "space-between", alignItems: "baseline",
-    padding: "7px 0", borderBottom: `1px solid ${C.border}`,
-  }}>
+  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", padding: "7px 0", borderBottom: `1px solid ${C.border}` }}>
     <span style={{ fontSize: 10, color: C.textSub, letterSpacing: 1.2, fontFamily: "monospace" }}>{label}</span>
     <span style={{ fontSize: large ? 18 : 14, fontWeight: 700, color: valueColor, fontFamily: "monospace" }}>{value}</span>
   </div>
 );
-
 const Pill = ({ color, children }) => (
-  <span style={{
-    display: "inline-block", padding: "2px 9px", borderRadius: 10,
-    fontSize: 9, background: color + "22", color, border: `1px solid ${color}`,
-    letterSpacing: 1.2, fontWeight: 700, fontFamily: "monospace",
-  }}>{children}</span>
+  <span style={{ display: "inline-block", padding: "2px 9px", borderRadius: 10, fontSize: 9, background: color + "22", color, border: `1px solid ${color}`, letterSpacing: 1.2, fontWeight: 700, fontFamily: "monospace" }}>{children}</span>
 );
+const Divider = ({ label }) => (
+  <div style={{ display: "flex", alignItems: "center", gap: 8, margin: "12px 0 8px" }}>
+    <div style={{ flex: 1, height: 1, background: C.border }} />
+    {label && <span style={{ fontSize: 8, color: C.textMuted, letterSpacing: 2, fontFamily: "monospace" }}>{label}</span>}
+    <div style={{ flex: 1, height: 1, background: C.border }} />
+  </div>
+);
+
+// ─── Hold Timer Component ─────────────────────────────────────────────────────
+function HoldTimer({ legSecs, outAdjSecs }) {
+  const targetSecs = outAdjSecs || legSecs || 60;
+  const [phase, setPhase] = useState("idle"); // idle | outbound | inbound
+  const [elapsed, setElapsed] = useState(0);
+  const startRef = useRef(null);
+  const rafRef   = useRef(null);
+
+  const tick = useCallback(() => {
+    const now = Date.now();
+    setElapsed(Math.floor((now - startRef.current) / 1000));
+    rafRef.current = requestAnimationFrame(tick);
+  }, []);
+
+  const start = () => {
+    startRef.current = Date.now();
+    setElapsed(0);
+    setPhase("outbound");
+    rafRef.current = requestAnimationFrame(tick);
+  };
+
+  const nextPhase = () => {
+    if (phase === "outbound") {
+      startRef.current = Date.now();
+      setElapsed(0);
+      setPhase("inbound");
+      rafRef.current = requestAnimationFrame(tick);
+    } else {
+      cancelAnimationFrame(rafRef.current);
+      setPhase("idle");
+      setElapsed(0);
+    }
+  };
+
+  useEffect(() => () => cancelAnimationFrame(rafRef.current), []);
+
+  const remaining = targetSecs - elapsed;
+  const overshot  = remaining < 0;
+  const pct       = Math.min(1, elapsed / targetSecs);
+
+  let timerColor = C.accent;
+  let timerLabel = "";
+  if (phase === "outbound") {
+    timerColor = overshot ? C.red : elapsed > targetSecs * 0.85 ? C.green : C.accent;
+    timerLabel = overshot ? `OVERSHOT ${fmtTime(Math.abs(remaining))}` : fmtTime(remaining);
+  } else if (phase === "inbound") {
+    timerColor = C.blue;
+    timerLabel = fmtTime(elapsed);
+  }
+
+  return (
+    <Card>
+      <CardTitle icon="⏱">HOLD TIMER</CardTitle>
+      <div style={{ fontSize: 10, color: C.textSub, marginBottom: 12 }}>
+        Target outbound: <strong style={{ color: C.accent }}>{fmtTime(targetSecs)}</strong>
+        {outAdjSecs && outAdjSecs !== legSecs && <span style={{ color: C.textMuted }}> (wind-adjusted)</span>}
+      </div>
+
+      {/* Progress arc */}
+      <div style={{ display: "flex", justifyContent: "center", marginBottom: 12 }}>
+        <svg viewBox="0 0 120 120" style={{ width: 120 }}>
+          <circle cx={60} cy={60} r={50} fill="none" stroke={C.border} strokeWidth={8} />
+          {phase !== "idle" && (
+            <circle cx={60} cy={60} r={50} fill="none"
+              stroke={timerColor} strokeWidth={8}
+              strokeDasharray={`${2 * Math.PI * 50}`}
+              strokeDashoffset={`${2 * Math.PI * 50 * (phase === "inbound" ? 0 : 1 - pct)}`}
+              strokeLinecap="round"
+              style={{ transformOrigin: "60px 60px", transform: "rotate(-90deg)", transition: "stroke 0.3s" }} />
+          )}
+          <text x={60} y={55} textAnchor="middle" fontSize={phase === "idle" ? "11" : "22"}
+            fontWeight="700" fill={phase === "idle" ? C.textSub : timerColor} fontFamily="monospace">
+            {phase === "idle" ? "READY" : timerLabel}
+          </text>
+          {phase !== "idle" && (
+            <text x={60} y={74} textAnchor="middle" fontSize="9" fill={C.textSub} fontFamily="monospace">
+              {phase === "outbound" ? "OUTBOUND" : "INBOUND"}
+            </text>
+          )}
+        </svg>
+      </div>
+
+      <div style={{ display: "flex", gap: 8 }}>
+        {phase === "idle"
+          ? <button onClick={start} style={{ flex: 1, background: C.accentDim, border: `1px solid ${C.accent}`, borderRadius: 6, color: C.accent, cursor: "pointer", padding: "12px", fontSize: 12, fontFamily: "monospace", fontWeight: 700, letterSpacing: 1.5 }}>
+              START (ABEAM / WINGS LEVEL)
+            </button>
+          : <>
+              <button onClick={nextPhase} style={{ flex: 1, background: C.blueDim, border: `1px solid ${C.blue}`, borderRadius: 6, color: C.blue, cursor: "pointer", padding: "12px", fontSize: 11, fontFamily: "monospace", fontWeight: 700, letterSpacing: 1 }}>
+                {phase === "outbound" ? "▶ TURNING INBOUND" : "✓ FIX OVERHEAD"}
+              </button>
+              <button onClick={() => { cancelAnimationFrame(rafRef.current); setPhase("idle"); setElapsed(0); }}
+                style={{ background: C.redDim, border: `1px solid ${C.red}`, borderRadius: 6, color: C.red, cursor: "pointer", padding: "12px 14px", fontSize: 11, fontFamily: "monospace" }}>
+                RST
+              </button>
+            </>
+        }
+      </div>
+    </Card>
+  );
+}
+
+// ─── Approach Brief Tab ───────────────────────────────────────────────────────
+function ApproachBriefTab({ windCalc, sectorEntryFromCalc }) {
+  const TYPES = ["NDB", "RNP", "ILS", "VOR"];
+  const [b, setB] = useState(() => {
+    try { return JSON.parse(localStorage.getItem("holdmaster_brief") || "{}"); }
+    catch { return {}; }
+  });
+  const [copied, setCopied]   = useState(false);
+  const [preview, setPreview] = useState(false);
+
+  const set = (key, val) => setB(prev => {
+    const next = { ...prev, [key]: val };
+    try { localStorage.setItem("holdmaster_brief", JSON.stringify(next)); } catch {}
+    return next;
+  });
+
+  const setFreq = (i, field, val) => {
+    const freqs = [...(b.freqs || [{ label: "", freq: "" }])];
+    freqs[i] = { ...freqs[i], [field]: val };
+    set("freqs", freqs);
+  };
+  const addFreq = () => set("freqs", [...(b.freqs || []), { label: "", freq: "" }]);
+  const delFreq = (i) => { const f = [...(b.freqs || [])]; f.splice(i, 1); set("freqs", f); };
+
+  const setCheckHeight = (i, field, val) => {
+    const ch = [...(b.checkHeights || [{ alt: "", dist: "", fix: "", dme: "" }])];
+    ch[i] = { ...ch[i], [field]: val };
+    set("checkHeights", ch);
+  };
+  const addCH = () => set("checkHeights", [...(b.checkHeights || []), { alt: "", dist: "", fix: "", dme: "" }]);
+  const delCH = (i) => { const c = [...(b.checkHeights || [])]; c.splice(i, 1); set("checkHeights", c); };
+
+  const type = b.approachType || "NDB";
+
+  // Auto-derive sector entry if hold params match
+  const inb     = parseInt(b.holdInbound) || null;
+  const acH     = parseInt(b.acHdgAtFix) || null;
+  const tDir    = b.holdTurnDir || "L";
+  const se      = (inb !== null && acH !== null) ? getSectorEntry(acH, inb, tDir) : sectorEntryFromCalc;
+
+  const briefText = generateBrief(b, se, windCalc);
+
+  const copy = () => {
+    navigator.clipboard?.writeText(briefText).then(() => { setCopied(true); setTimeout(() => setCopied(false), 2000); });
+  };
+
+  const F = { flex: 1, display: "flex", flexDirection: "column" };
+  const Row = ({ children }) => <div style={{ display: "flex", gap: 10, marginBottom: 10 }}>{children}</div>;
+
+  const sectionStyle = { background: C.bg, border: `1px solid ${C.border}`, borderRadius: 6, padding: "10px 12px", marginBottom: 8 };
+  const sectionTitle = { fontSize: 8, letterSpacing: 2, color: C.textMuted, textTransform: "uppercase", marginBottom: 8, fontFamily: "monospace" };
+
+  return (
+    <div>
+      {/* Approach type selector */}
+      <Card>
+        <CardTitle icon="◈">APPROACH TYPE</CardTitle>
+        <div style={{ display: "flex", gap: 6, marginBottom: 10 }}>
+          {TYPES.map(t => (
+            <button key={t} onClick={() => set("approachType", t)}
+              style={{ flex: 1, padding: "10px 4px", background: type === t ? C.accentDim : C.bg, border: `1px solid ${type === t ? C.accent : C.border}`, borderRadius: 6, color: type === t ? C.accent : C.textSub, cursor: "pointer", fontSize: 12, fontFamily: "monospace", fontWeight: type === t ? 700 : 400 }}>
+              {t}
+            </button>
+          ))}
+        </div>
+        <Row>
+          <div style={F}><Label>ICAO</Label><Input type="text" value={b.icao || ""} onChange={e => set("icao", e.target.value.toUpperCase())} placeholder="YMDG" /></div>
+          <div style={F}><Label>Aerodrome Name</Label><Input type="text" value={b.aeroName || ""} onChange={e => set("aeroName", e.target.value)} placeholder="Mudgee" /></div>
+        </Row>
+        <Row>
+          <div style={F}><Label>Runway</Label><Input type="text" value={b.runway || ""} onChange={e => set("runway", e.target.value.toUpperCase())} placeholder="22" /></div>
+          <div style={F}><Label>Chart Date</Label><Input type="text" value={b.chartDate || ""} onChange={e => set("chartDate", e.target.value)} placeholder="04 SEP 2025" /></div>
+        </Row>
+      </Card>
+
+      {/* Frequencies */}
+      <Card>
+        <CardTitle icon="◈">FREQUENCIES</CardTitle>
+        {(b.freqs || [{ label: "", freq: "" }]).map((f, i) => (
+          <div key={i} style={{ display: "flex", gap: 8, marginBottom: 6, alignItems: "flex-end" }}>
+            <div style={{ flex: 1 }}><Label>Label</Label><Input type="text" value={f.label} onChange={e => setFreq(i, "label", e.target.value.toUpperCase())} placeholder="CTAF" /></div>
+            <div style={{ flex: 1 }}><Label>Frequency</Label><Input type="text" value={f.freq} onChange={e => setFreq(i, "freq", e.target.value)} placeholder="126.7" /></div>
+            <button onClick={() => delFreq(i)} style={{ background: C.redDim, border: `1px solid ${C.red}`, borderRadius: 6, color: C.red, cursor: "pointer", padding: "10px 12px", fontFamily: "monospace", flexShrink: 0, alignSelf: "flex-end", marginBottom: 0 }}>✕</button>
+          </div>
+        ))}
+        <button onClick={addFreq} style={{ background: C.surfaceRaise, border: `1px solid ${C.border}`, borderRadius: 6, color: C.textSub, cursor: "pointer", padding: "8px 14px", fontSize: 11, fontFamily: "monospace", width: "100%" }}>+ ADD FREQUENCY</button>
+      </Card>
+
+      {/* Navaid */}
+      <Card>
+        <CardTitle icon="◈">NAVAID</CardTitle>
+        {type === "NDB" && (
+          <Row>
+            <div style={F}><Label>NDB Frequency</Label><Input type="text" value={b.ndbFreq || ""} onChange={e => set("ndbFreq", e.target.value)} placeholder="398" /></div>
+            <div style={F}><Label>NDB Ident</Label><Input type="text" value={b.ndbIdent || ""} onChange={e => set("ndbIdent", e.target.value.toUpperCase())} placeholder="MDG" /></div>
+          </Row>
+        )}
+        {type === "ILS" && (
+          <Row>
+            <div style={F}><Label>ILS Frequency</Label><Input type="text" value={b.ilsFreq || ""} onChange={e => set("ilsFreq", e.target.value)} placeholder="109.9" /></div>
+            <div style={F}><Label>ILS Ident</Label><Input type="text" value={b.ilsIdent || ""} onChange={e => set("ilsIdent", e.target.value.toUpperCase())} placeholder="ITW" /></div>
+          </Row>
+        )}
+        {type === "VOR" && (
+          <Row>
+            <div style={F}><Label>VOR Frequency</Label><Input type="text" value={b.vorFreq || ""} onChange={e => set("vorFreq", e.target.value)} placeholder="116.0" /></div>
+            <div style={F}><Label>VOR Ident</Label><Input type="text" value={b.vorIdent || ""} onChange={e => set("vorIdent", e.target.value.toUpperCase())} placeholder="TW" /></div>
+          </Row>
+        )}
+        {type === "RNP" && (
+          <div style={{ fontSize: 11, color: C.green, padding: "8px 0" }}>
+            ✓ RNP approach — GNSS programmed and cross-checked statement will be included.
+          </div>
+        )}
+        <Row>
+          <div style={F}><Label>MSA Distance (NM)</Label><Input type="text" value={b.msaDist || ""} onChange={e => set("msaDist", e.target.value)} placeholder="10" /></div>
+          <div style={F}><Label>MSA (ft)</Label><Input value={b.msa || ""} onChange={e => set("msa", e.target.value)} placeholder="4500" /></div>
+        </Row>
+        <Row>
+          <div style={F}><Label>Aerodrome Elevation (ft)</Label><Input value={b.aeroElev || ""} onChange={e => set("aeroElev", e.target.value)} placeholder="1545" /></div>
+        </Row>
+      </Card>
+
+      {/* Sector Entry */}
+      <Card>
+        <CardTitle icon="◈">SECTOR ENTRY</CardTitle>
+        <Row>
+          <div style={F}><Label>AC Heading at Fix (°M)</Label><Input value={b.acHdgAtFix || ""} onChange={e => set("acHdgAtFix", e.target.value)} placeholder="203" /></div>
+          <div style={F}><Label>Approach Desc (opt)</Label><Input type="text" value={b.approachDesc || ""} onChange={e => set("approachDesc", e.target.value)} placeholder="I will be flying in at…" /></div>
+        </Row>
+        {type === "RNP" && (
+          <div style={{ marginBottom: 10 }}>
+            <Label>IAF Fix</Label>
+            <Input type="text" value={b.iafFix || ""} onChange={e => set("iafFix", e.target.value.toUpperCase())} placeholder="DBOWD" />
+          </div>
+        )}
+        {type === "ILS" && (
+          <Row>
+            <div style={F}><Label>IAF Fix</Label><Input type="text" value={b.iafFix || ""} onChange={e => set("iafFix", e.target.value.toUpperCase())} placeholder="VETAK" /></div>
+            <div style={F}><Label>IAF DME</Label><Input type="text" value={b.iafDme || ""} onChange={e => set("iafDme", e.target.value)} placeholder="13.5 ITW DME" /></div>
+          </Row>
+        )}
+        {se && (
+          <div style={{ background: se.bgColor, border: `1px solid ${se.borderColor}`, borderRadius: 6, padding: "8px 12px", marginTop: 6 }}>
+            <Pill color={se.color}>{se.badge}</Pill>
+            <div style={{ fontSize: 10, color: C.textSub, marginTop: 6 }}>Auto-derived from heading inputs above.</div>
+          </div>
+        )}
+        {/* Outbound timing */}
+        <Divider label="OUTBOUND TIMING" />
+        <Row>
+          <div style={F}><Label>TW (sec)</Label><Input value={b.twSecs || ""} onChange={e => set("twSecs", e.target.value)} placeholder="5" /></div>
+          <div style={F}><Label>Nil Wind (sec)</Label><Input value={b.nilSecs || ""} onChange={e => set("nilSecs", e.target.value)} placeholder="15" /></div>
+          <div style={F}><Label>HW (sec)</Label><Input value={b.hwSecs || ""} onChange={e => set("hwSecs", e.target.value)} placeholder="20" /></div>
+        </Row>
+        {type === "NDB" && se?.sector === 2 && (
+          <div>
+            <Label>S2 Outbound Time (written)</Label>
+            <Input type="text" value={b.s2OutboundTime || ""} onChange={e => set("s2OutboundTime", e.target.value)} placeholder="1 minute 15 seconds" />
+          </div>
+        )}
+      </Card>
+
+      {/* Hold Parameters */}
+      <Card>
+        <CardTitle icon="◈">HOLDING PATTERN</CardTitle>
+        <Row>
+          <div style={F}><Label>Hold Fix Name</Label><Input type="text" value={b.holdFix || ""} onChange={e => set("holdFix", e.target.value.toUpperCase())} placeholder="MDG" /></div>
+          <div style={F}><Label>Inbound Track (°M)</Label><Input value={b.holdInbound || ""} onChange={e => set("holdInbound", e.target.value)} placeholder="009" /></div>
+        </Row>
+        <Row>
+          <div style={F}>
+            <Label>Turn Direction</Label>
+            <div style={{ display: "flex", gap: 6 }}>
+              <SegBtn active={tDir === "R"} onClick={() => set("holdTurnDir", "R")}>RIGHT (STD)</SegBtn>
+              <SegBtn active={tDir === "L"} onClick={() => set("holdTurnDir", "L")}>LEFT (NON-STD)</SegBtn>
+            </div>
+          </div>
+        </Row>
+        <Row>
+          <div style={F}><Label>Min Hold Alt (ft)</Label><Input value={b.holdAlt || ""} onChange={e => set("holdAlt", e.target.value)} placeholder="4500" /></div>
+          <div style={F}><Label>Hold Leg Time</Label><Input type="text" value={b.holdLeg || ""} onChange={e => set("holdLeg", e.target.value)} placeholder="1 minute" /></div>
+        </Row>
+      </Card>
+
+      {/* Procedure / Descent */}
+      <Card>
+        <CardTitle icon="◈">PROCEDURE & DESCENT</CardTitle>
+
+        {(type === "NDB" || type === "VOR") && (
+          <>
+            <Row>
+              <div style={F}><Label>Outbound Track (°M)</Label><Input value={b.outboundTrack || ""} onChange={e => set("outboundTrack", e.target.value)} placeholder="189" /></div>
+              <div style={F}><Label>Outbound Time (min)</Label><Input type="text" value={b.outboundTime || ""} onChange={e => set("outboundTime", e.target.value)} placeholder="3.5" /></div>
+            </Row>
+            {type === "VOR" && (
+              <div style={{ marginBottom: 10 }}>
+                <Label>Cat Note (e.g. Cat A/B)</Label>
+                <Input type="text" value={b.catNote || ""} onChange={e => set("catNote", e.target.value)} placeholder="Cat A/B" />
+              </div>
+            )}
+            <Row>
+              <div style={F}><Label>Descent From (ft)</Label><Input value={b.descentFrom || ""} onChange={e => set("descentFrom", e.target.value)} placeholder="5000" /></div>
+              <div style={F}><Label>Descent To (ft)</Label><Input value={b.descentTo || ""} onChange={e => set("descentTo", e.target.value)} placeholder="3700" /></div>
+            </Row>
+            <Row>
+              <div style={F}><Label>Final Turn Direction</Label>
+                <div style={{ display: "flex", gap: 6 }}>
+                  <SegBtn active={b.finalTurnDir === "right" || !b.finalTurnDir} onClick={() => set("finalTurnDir", "right")}>RIGHT</SegBtn>
+                  <SegBtn active={b.finalTurnDir === "left"} onClick={() => set("finalTurnDir", "left")}>LEFT</SegBtn>
+                </div>
+              </div>
+              <div style={F}><Label>Final Inbound (°M)</Label><Input value={b.finalInbound || ""} onChange={e => set("finalInbound", e.target.value)} placeholder="209" /></div>
+            </Row>
+          </>
+        )}
+
+        {type === "RNP" && (
+          <>
+            <Row>
+              <div style={F}><Label>Transition Track (°M)</Label><Input value={b.transitionTrack || ""} onChange={e => set("transitionTrack", e.target.value)} placeholder="333" /></div>
+              <div style={F}><Label>Transition Dist (NM)</Label><Input value={b.transitionNM || ""} onChange={e => set("transitionNM", e.target.value)} placeholder="5" /></div>
+            </Row>
+            <Row>
+              <div style={F}><Label>IF Fix</Label><Input type="text" value={b.ifFix || ""} onChange={e => set("ifFix", e.target.value.toUpperCase())} placeholder="DBOWI" /></div>
+              <div style={F}><Label>FAF Fix</Label><Input type="text" value={b.fafFix || ""} onChange={e => set("fafFix", e.target.value.toUpperCase())} placeholder="DBOWF" /></div>
+            </Row>
+            <Row>
+              <div style={F}><Label>Descent From (ft)</Label><Input value={b.descentFrom || ""} onChange={e => set("descentFrom", e.target.value)} placeholder="5000" /></div>
+              <div style={F}><Label>Descent To (ft)</Label><Input value={b.descentTo || ""} onChange={e => set("descentTo", e.target.value)} placeholder="4100" /></div>
+            </Row>
+            <Row>
+              <div style={F}><Label>Final Turn Dir</Label>
+                <div style={{ display: "flex", gap: 6 }}>
+                  <SegBtn active={b.finalTurnDir === "right" || !b.finalTurnDir} onClick={() => set("finalTurnDir", "right")}>RIGHT</SegBtn>
+                  <SegBtn active={b.finalTurnDir === "left"} onClick={() => set("finalTurnDir", "left")}>LEFT</SegBtn>
+                </div>
+              </div>
+              <div style={F}><Label>Final Inbound (°M)</Label><Input value={b.finalInbound || ""} onChange={e => set("finalInbound", e.target.value)} placeholder="043" /></div>
+            </Row>
+            <Row>
+              <div style={F}><Label>Gear Dist prior FAF (NM)</Label><Input type="text" value={b.gearDist || ""} onChange={e => set("gearDist", e.target.value)} placeholder="0.5" /></div>
+              <div style={F}><Label>Power Config</Label><Input type="text" value={b.powerConfig || ""} onChange={e => set("powerConfig", e.target.value)} placeholder="16'' / 2300 RPM" /></div>
+            </Row>
+            <Row>
+              <div style={F}><Label>Descent Angle (°)</Label><Input type="text" value={b.descentAngle || ""} onChange={e => set("descentAngle", e.target.value)} placeholder="3" /></div>
+            </Row>
+          </>
+        )}
+
+        {type === "ILS" && (
+          <>
+            <Row>
+              <div style={F}><Label>Power Config</Label><Input type="text" value={b.powerConfig || ""} onChange={e => set("powerConfig", e.target.value)} placeholder="16'' / 2300 RPM" /></div>
+            </Row>
+            <div style={{ marginBottom: 10 }}>
+              <Label>G/S Fail Action (opt)</Label>
+              <Input type="text" value={b.gsFail || ""} onChange={e => set("gsFail", e.target.value)} placeholder="continue with localiser using check-heights" />
+            </div>
+            <div style={{ marginBottom: 10 }}>
+              <Label>LOC Fail Action (opt)</Label>
+              <Input type="text" value={b.locFail || ""} onChange={e => set("locFail", e.target.value)} placeholder="go missed and carry out the VOR approach" />
+            </div>
+          </>
+        )}
+
+        {type === "VOR" && (
+          <>
+            <div style={{ marginBottom: 10 }}>
+              <Label>Stabilised Note (opt)</Label>
+              <Input type="text" value={b.stabilisedNote || ""} onChange={e => set("stabilisedNote", e.target.value)} placeholder="Once stabilised inbound, gears down, set 16'' / 2300 RPM..." />
+            </div>
+            <div style={{ marginBottom: 10 }}>
+              <Label>VOR Fail Action (opt)</Label>
+              <Input type="text" value={b.vorFail || ""} onChange={e => set("vorFail", e.target.value)} placeholder="If the VOR fails, we will conduct a missed approach..." />
+            </div>
+          </>
+        )}
+      </Card>
+
+      {/* Check Heights */}
+      {(type === "RNP" || type === "ILS") && (
+        <Card>
+          <CardTitle icon="◈">CHECK HEIGHTS</CardTitle>
+          {(b.checkHeights || [{ alt: "", dist: "", fix: "", dme: "" }]).map((ch, i) => (
+            <div key={i} style={{ display: "flex", gap: 6, marginBottom: 8, alignItems: "flex-end" }}>
+              {type === "ILS" && <div style={{ flex: 1 }}><Label>Fix</Label><Input type="text" value={ch.fix || ""} onChange={e => setCheckHeight(i, "fix", e.target.value.toUpperCase())} placeholder="VEBMI" /></div>}
+              {type === "ILS" && <div style={{ flex: 1 }}><Label>DME</Label><Input type="text" value={ch.dme || ""} onChange={e => setCheckHeight(i, "dme", e.target.value)} placeholder="5.5NM ITW" /></div>}
+              {type === "RNP" && <div style={{ flex: 1 }}><Label>Dist (NM)</Label><Input type="text" value={ch.dist || ""} onChange={e => setCheckHeight(i, "dist", e.target.value)} placeholder="4" /></div>}
+              <div style={{ flex: 1 }}><Label>Alt (ft)</Label><Input value={ch.alt || ""} onChange={e => setCheckHeight(i, "alt", e.target.value)} placeholder="2660" /></div>
+              <button onClick={() => delCH(i)} style={{ background: C.redDim, border: `1px solid ${C.red}`, borderRadius: 6, color: C.red, cursor: "pointer", padding: "10px 12px", fontFamily: "monospace", flexShrink: 0, alignSelf: "flex-end" }}>✕</button>
+            </div>
+          ))}
+          <button onClick={addCH} style={{ background: C.surfaceRaise, border: `1px solid ${C.border}`, borderRadius: 6, color: C.textSub, cursor: "pointer", padding: "8px 14px", fontSize: 11, fontFamily: "monospace", width: "100%" }}>+ ADD CHECK HEIGHT</button>
+        </Card>
+      )}
+
+      {/* Minima */}
+      <Card>
+        <CardTitle icon="◈">MINIMA</CardTitle>
+        {(type === "NDB" || type === "VOR") && (
+          <>
+            <Row>
+              <div style={F}><Label>MDA (ft)</Label><Input value={b.mda || ""} onChange={e => set("mda", e.target.value)} placeholder="3110" /></div>
+              <div style={F}><Label>MDA AGL (ft, NDB)</Label><Input value={b.mdaAgl || ""} onChange={e => set("mdaAgl", e.target.value)} placeholder="1565" /></div>
+            </Row>
+            {type === "VOR" && (
+              <div style={{ marginBottom: 10 }}>
+                <Label>MDA with ATIS (ft)</Label>
+                <Input value={b.mdaAtis || ""} onChange={e => set("mdaAtis", e.target.value)} placeholder="2070" />
+              </div>
+            )}
+            <Row>
+              <div style={F}><Label>Visibility (km)</Label><Input type="text" value={b.visibility || ""} onChange={e => set("visibility", e.target.value)} placeholder="5.0" /></div>
+            </Row>
+            {type === "NDB" && (
+              <Row>
+                <div style={F}><Label>Circling MDA (ft)</Label><Input value={b.circlingMda || ""} onChange={e => set("circlingMda", e.target.value)} placeholder="3150" /></div>
+                <div style={F}><Label>Circling Vis (km)</Label><Input type="text" value={b.circlingVis || ""} onChange={e => set("circlingVis", e.target.value)} placeholder="2.4" /></div>
+              </Row>
+            )}
+          </>
+        )}
+        {type === "RNP" && (
+          <>
+            <Row>
+              <div style={F}><Label>LNAV MDA (ft)</Label><Input value={b.lnavMda || ""} onChange={e => set("lnavMda", e.target.value)} placeholder="1530" /></div>
+              <div style={F}><Label>LNAV MDA w/ ATIS (ft)</Label><Input value={b.lnavMdaAtis || ""} onChange={e => set("lnavMdaAtis", e.target.value)} placeholder="1430" /></div>
+            </Row>
+            <Row>
+              <div style={F}><Label>LNAV Vis (km)</Label><Input type="text" value={b.lnavVis || ""} onChange={e => set("lnavVis", e.target.value)} placeholder="3.4" /></div>
+              <div style={F}><Label>ATIS Note</Label><Input type="text" value={b.atisNote || ""} onChange={e => set("atisNote", e.target.value)} placeholder="ATIS in this case" /></div>
+            </Row>
+            <Divider label="LNAV/VNAV (IF APPLICABLE)" />
+            <Row>
+              <div style={F}><Label>LNAV/VNAV DA (ft)</Label><Input value={b.lnavVnavDa || ""} onChange={e => set("lnavVnavDa", e.target.value)} placeholder="1350" /></div>
+              <div style={F}><Label>LNAV/VNAV Vis (km)</Label><Input type="text" value={b.lnavVnavVis || ""} onChange={e => set("lnavVnavVis", e.target.value)} placeholder="2.3" /></div>
+            </Row>
+            <div style={{ marginBottom: 0 }}>
+              <Label>LNAV/VNAV Note (opt)</Label>
+              <Input type="text" value={b.lnavVnavNote || ""} onChange={e => set("lnavVnavNote", e.target.value)} placeholder="If LNAV/VNAV is utilised" />
+            </div>
+          </>
+        )}
+        {type === "ILS" && (
+          <>
+            <Row>
+              <div style={F}><Label>DA (ft)</Label><Input value={b.da || ""} onChange={e => set("da", e.target.value)} placeholder="1740" /></div>
+              <div style={F}><Label>DA AGL (ft)</Label><Input value={b.daAgl || ""} onChange={e => set("daAgl", e.target.value)} placeholder="414" /></div>
+            </Row>
+            <Row>
+              <div style={F}><Label>DA Vis</Label><Input type="text" value={b.daVis || ""} onChange={e => set("daVis", e.target.value)} placeholder="2.4km" /></div>
+              <div style={F}><Label>Vis Note (opt)</Label><Input type="text" value={b.daVisNote || ""} onChange={e => set("daVisNote", e.target.value)} placeholder="/ 1.8km with actual QNH" /></div>
+            </Row>
+            <Divider label="LOC-ONLY (IF APPLICABLE)" />
+            <Row>
+              <div style={F}><Label>LOC MDA (ft)</Label><Input value={b.locOnlyMda || ""} onChange={e => set("locOnlyMda", e.target.value)} placeholder="1990" /></div>
+              <div style={F}><Label>LOC AGL (ft)</Label><Input value={b.locOnlyAgl || ""} onChange={e => set("locOnlyAgl", e.target.value)} placeholder="664" /></div>
+            </Row>
+            <div style={{ marginBottom: 0 }}>
+              <Label>LOC Vis (km)</Label>
+              <Input type="text" value={b.locOnlyVis || ""} onChange={e => set("locOnlyVis", e.target.value)} placeholder="3.8" />
+            </div>
+          </>
+        )}
+      </Card>
+
+      {/* Alternate */}
+      <Card>
+        <CardTitle icon="◈">ALTERNATE</CardTitle>
+        <div style={{ display: "flex", gap: 6, marginBottom: 10 }}>
+          <SegBtn active={!b.alternateReqd || b.alternateReqd === "no"} onClick={() => set("alternateReqd", "no")}>NOT REQUIRED</SegBtn>
+          <SegBtn active={b.alternateReqd === "yes"} onClick={() => set("alternateReqd", "yes")}>REQUIRED</SegBtn>
+        </div>
+        <div>
+          <Label>{b.alternateReqd === "yes" ? "Alternate Destination" : "Reason Not Required"}</Label>
+          <Input type="text" value={b.alternateReason || ""} onChange={e => set("alternateReason", e.target.value)}
+            placeholder={b.alternateReqd === "yes" ? "YMML" : "fuel / weather margins"} />
+        </div>
+        {b.alternateReqd === "yes" && (
+          <div style={{ marginTop: 8 }}>
+            <Label>Alternate Dest ICAO</Label>
+            <Input type="text" value={b.alternateDest || ""} onChange={e => set("alternateDest", e.target.value.toUpperCase())} placeholder="YMML" />
+          </div>
+        )}
+      </Card>
+
+      {/* Missed Approach */}
+      <Card>
+        <CardTitle icon="◈">MISSED APPROACH</CardTitle>
+        <Row>
+          <div style={F}><Label>Initial Turn</Label>
+            <div style={{ display: "flex", gap: 6 }}>
+              <SegBtn active={b.missedTurn !== "left"} onClick={() => set("missedTurn", "right")}>RIGHT</SegBtn>
+              <SegBtn active={b.missedTurn === "left"} onClick={() => set("missedTurn", "left")}>LEFT</SegBtn>
+            </div>
+          </div>
+          <div style={F}><Label>Track (°M)</Label><Input value={b.missedTrack || ""} onChange={e => set("missedTrack", e.target.value)} placeholder="300" /></div>
+        </Row>
+        <Row>
+          <div style={F}><Label>Climb to (ft)</Label><Input value={b.missedAlt || ""} onChange={e => set("missedAlt", e.target.value)} placeholder="4100" /></div>
+          {type === "RNP" && <div style={F}><Label>Missed Fix (DCT to)</Label><Input type="text" value={b.missedFix || ""} onChange={e => set("missedFix", e.target.value.toUpperCase())} placeholder="DBOWH" /></div>}
+        </Row>
+        <div style={{ marginBottom: 0 }}>
+          <Label>Additional Detail (opt)</Label>
+          <Input type="text" value={b.missedDetail || ""} onChange={e => set("missedDetail", e.target.value)} placeholder="During TWR hours, proceed as directed by ATC..." />
+        </div>
+        {type === "ILS" && (
+          <div style={{ marginTop: 8 }}>
+            <Label>Outside TWR Hours (opt)</Label>
+            <Input type="text" value={b.missedOutsideTWR || ""} onChange={e => set("missedOutsideTWR", e.target.value)} placeholder="turn left, track to VOR/DME, climb to 4500ft..." />
+          </div>
+        )}
+      </Card>
+
+      {/* VDP Calculator */}
+      {(type === "NDB" || type === "VOR") && (
+        <Card>
+          <CardTitle icon="◈">VDP — VISUAL DESCENT POINT</CardTitle>
+          <div style={{ fontSize: 10, color: C.textSub, marginBottom: 10, lineHeight: 1.6 }}>
+            VDP distance from threshold: <strong style={{ color: C.text }}>(MDA − TDZE) ÷ 300</strong><br />
+            Then verify: at VDP height = MDA, you should see runway environment.
+          </div>
+          {b.mda && b.aeroElev && (
+            (() => {
+              const mda = parseFloat(b.mda);
+              const tdze = parseFloat(b.aeroElev);
+              const tasKt = parseFloat(b.vdpTas || "90");
+              const vdpDist = ((mda - tdze) / 300).toFixed(2);
+              const vdpTimeSecs = Math.round((parseFloat(vdpDist) / tasKt) * 3600);
+              return (
+                <>
+                  <DataRow label="HEIGHT ABOVE TDZE" value={`${Math.round(mda - tdze)}ft`} />
+                  <DataRow label="VDP DISTANCE FROM THR" value={`${vdpDist} NM`} valueColor={C.accent} large />
+                  <DataRow label="TIME FROM THR @ TAS" value={fmtTime(vdpTimeSecs)} valueColor={C.blue} />
+                  <div style={{ marginTop: 10 }}>
+                    <Label>TAS for timing (kt)</Label>
+                    <Input value={b.vdpTas || ""} onChange={e => set("vdpTas", e.target.value)} placeholder="90" />
+                  </div>
+                </>
+              );
+            })()
+          )}
+          {(!b.mda || !b.aeroElev) && (
+            <div style={{ fontSize: 11, color: C.textMuted }}>Enter MDA and Aerodrome Elevation above to compute.</div>
+          )}
+        </Card>
+      )}
+
+      {/* Preview / Copy */}
+      <Card style={{ borderColor: C.accent + "44" }}>
+        <div style={{ display: "flex", gap: 8, marginBottom: preview ? 12 : 0 }}>
+          <button onClick={() => setPreview(p => !p)}
+            style={{ flex: 1, background: C.accentDim, border: `1px solid ${C.accent}`, borderRadius: 6, color: C.accent, cursor: "pointer", padding: "12px", fontSize: 11, fontFamily: "monospace", fontWeight: 700, letterSpacing: 1.5 }}>
+            {preview ? "HIDE BRIEF" : "PREVIEW BRIEF"}
+          </button>
+          <button onClick={copy}
+            style={{ background: C.greenDim, border: `1px solid ${C.green}`, borderRadius: 6, color: C.green, cursor: "pointer", padding: "12px 16px", fontSize: 11, fontFamily: "monospace", fontWeight: 700 }}>
+            {copied ? "✓ COPIED" : "COPY"}
+          </button>
+        </div>
+        {preview && (
+          <div style={{ background: C.bg, border: `1px solid ${C.border}`, borderRadius: 6, padding: "14px", fontSize: 11, color: C.text, lineHeight: 2, fontFamily: "monospace", whiteSpace: "pre-wrap", wordBreak: "break-word" }}>
+            {briefText}
+          </div>
+        )}
+      </Card>
+    </div>
+  );
+}
 
 // ─── Main App ─────────────────────────────────────────────────────────────────
 export default function HoldMaster() {
@@ -438,6 +985,10 @@ export default function HoldMaster() {
   const [windSpd, setWindSpd]           = useState("");
   const [saveKey, setSaveKey]           = useState("");
   const [saved, setSaved]               = useState(false);
+  // Fuel
+  const [fuelFlow, setFuelFlow]         = useState("");
+  const [fuelUnit, setFuelUnit]         = useState("L");
+  const [fuelReserve, setFuelReserve]   = useState("");
 
   // ── Memory bank ──
   const [memories, setMemories] = useState(() => {
@@ -459,11 +1010,14 @@ export default function HoldMaster() {
   const hdg  = parseInt(acHdg, 10);
   const wd   = parseInt(windDir, 10);
   const ws   = parseInt(windSpd, 10);
+  const ff   = parseFloat(fuelFlow);
+  const fr   = parseFloat(fuelReserve);
 
   const validBase = !isNaN(inb) && inb >= 0 && inb <= 360 && !isNaN(alt) && alt > 0;
   const hasSpeed  = validBase && !isNaN(tasN) && tasN > 0;
   const hasHdg    = validBase && !isNaN(hdg) && hdg >= 0 && hdg <= 360;
   const hasWind   = hasSpeed && !isNaN(wd) && !isNaN(ws) && ws >= 0;
+  const hasFuel   = !isNaN(ff) && ff > 0;
 
   const maxSpd   = validBase ? getMaxSpeed(cat, alt) : null;
   const legSecs  = validBase ? getLegTimeSecs(alt, chartedMin) : null;
@@ -471,6 +1025,14 @@ export default function HoldMaster() {
   const windCalc = hasWind   ? calcWind(inb, wd, ws, tasN) : null;
   const outAdj   = hasWind   ? calcOutboundTime(inb, wd, ws, tasN, legSecs) : null;
   const speedWarn = hasSpeed && tasN > maxSpd;
+
+  // Fuel calcs — per lap = 2× leg time (outbound + inbound) + 2 turns (~0.5min each)
+  const lapSecs    = legSecs ? (outAdj?.secs || legSecs) + legSecs + 60 : null;
+  const lapMins    = lapSecs ? lapSecs / 60 : null;
+  const fuelPerLap = hasFuel && lapMins ? (ff / 60) * lapMins : null;
+  const fuelAvail  = hasFuel && !isNaN(fr) && fr > 0 ? fr : null;
+  const lapsAvail  = fuelAvail && fuelPerLap ? Math.floor(fuelAvail / fuelPerLap) : null;
+  const enduranceMins = fuelAvail && hasFuel ? Math.floor((fuelAvail / ff) * 60) : null;
 
   // ── Save / load ──
   const buildSnapshot = () => ({
@@ -505,155 +1067,75 @@ export default function HoldMaster() {
     setTab("calc");
   };
 
-  const delMemory = (k) => {
-    setMemories(p => { const n = { ...p }; delete n[k]; return n; });
-    setDeleteConfirm(null);
-  };
+  const delMemory = (k) => { setMemories(p => { const n = { ...p }; delete n[k]; return n; }); setDeleteConfirm(null); };
 
-  const memKeys = Object.keys(memories)
-    .filter(k => k.toLowerCase().includes(memSearch.toLowerCase()))
-    .sort();
+  const memKeys = Object.keys(memories).filter(k => k.toLowerCase().includes(memSearch.toLowerCase())).sort();
 
-  // ─── Styles ───────────────────────────────────────────────────────────────
+  // ── Styles ──
   const S = {
-    app: {
-      background: C.bg, minHeight: "100vh", color: C.text,
-      fontFamily: "'SF Mono', 'Fira Mono', Consolas, monospace",
-      fontSize: 13, paddingBottom: 60,
-    },
-    header: {
-      background: C.surface, borderBottom: `1px solid ${C.border}`,
-      padding: "16px 16px 12px",
-      display: "flex", justifyContent: "space-between", alignItems: "center",
-    },
-    tabs: {
-      display: "flex", borderBottom: `1px solid ${C.border}`,
-      background: C.surface, overflowX: "auto",
-    },
-    tab: (active) => ({
-      flex: 1, padding: "12px 10px", cursor: "pointer",
-      fontSize: 9.5, letterSpacing: 2, fontFamily: "monospace", fontWeight: active ? 700 : 400,
-      color: active ? C.accent : C.textSub,
-      borderBottom: active ? `2px solid ${C.accent}` : "2px solid transparent",
-      background: "none", border: "none", borderBottom: active ? `2px solid ${C.accent}` : "2px solid transparent",
-      whiteSpace: "nowrap",
-    }),
-    body: { padding: "14px", maxWidth: 500, margin: "0 auto" },
-    row2: { display: "flex", gap: 10, marginBottom: 10 },
-    field: { flex: 1, display: "flex", flexDirection: "column" },
-    segGroup: { display: "flex", gap: 6, marginBottom: 10 },
+    app:      { background: C.bg, minHeight: "100vh", color: C.text, fontFamily: "'SF Mono','Fira Mono',Consolas,monospace", fontSize: 13, paddingBottom: 60 },
+    header:   { background: C.surface, borderBottom: `1px solid ${C.border}`, padding: "16px 16px 12px", display: "flex", justifyContent: "space-between", alignItems: "center" },
+    tabs:     { display: "flex", borderBottom: `1px solid ${C.border}`, background: C.surface, overflowX: "auto" },
+    tab:   (a) => ({ flex: 1, padding: "12px 8px", cursor: "pointer", fontSize: 8.5, letterSpacing: 1.8, fontFamily: "monospace", fontWeight: a ? 700 : 400, color: a ? C.accent : C.textSub, borderBottom: a ? `2px solid ${C.accent}` : "2px solid transparent", background: "none", border: "none", borderBottom: a ? `2px solid ${C.accent}` : "2px solid transparent", whiteSpace: "nowrap" }),
+    body:     { padding: "14px", maxWidth: 500, margin: "0 auto" },
+    row2:     { display: "flex", gap: 10, marginBottom: 10 },
+    field:    { flex: 1, display: "flex", flexDirection: "column" },
+    warnBox:  { background: "#2A1500", border: `1px solid #7A4000`, borderRadius: 8, padding: "10px 12px", fontSize: 11, color: C.accent, marginBottom: 10, lineHeight: 1.6 },
+    notesBox: { background: C.bg, border: `1px solid ${C.border}`, borderRadius: 6, padding: "10px 12px", fontSize: 10.5, color: C.textSub, lineHeight: 1.8, marginTop: 10 },
+    memCard:  { background: C.surfaceRaise, border: `1px solid ${C.border}`, borderRadius: 8, padding: "11px 13px", marginBottom: 8 },
+    btnPrim:  { background: C.accentDim, border: `1px solid ${C.accent}`, borderRadius: 6, color: C.accent, cursor: "pointer", padding: "10px 16px", fontSize: 10.5, fontFamily: "monospace", fontWeight: 700, letterSpacing: 1.5, flexShrink: 0 },
+    btnDanger:{ background: C.redDim, border: `1px solid ${C.red}`, borderRadius: 6, color: C.red, cursor: "pointer", padding: "8px 12px", fontSize: 10, fontFamily: "monospace", fontWeight: 700, letterSpacing: 1 },
+    btnNeutral:{ background: C.surfaceHigh, border: `1px solid ${C.border}`, borderRadius: 6, color: C.textSub, cursor: "pointer", padding: "8px 12px", fontSize: 10, fontFamily: "monospace" },
+    sectorBadge: (col) => ({ display: "inline-block", padding: "3px 12px", borderRadius: 12, fontSize: 10, fontWeight: 700, letterSpacing: 1.5, background: col + "18", color: col, border: `1px solid ${col}`, marginBottom: 10 }),
     stepItem: { display: "flex", gap: 9, marginBottom: 8, alignItems: "flex-start" },
-    stepNum: {
-      flexShrink: 0, width: 20, height: 20, borderRadius: "50%",
-      background: C.accentDim, color: C.accent,
-      display: "flex", alignItems: "center", justifyContent: "center",
-      fontSize: 9, fontWeight: 700,
-    },
+    stepNum:  { flexShrink: 0, width: 20, height: 20, borderRadius: "50%", background: C.accentDim, color: C.accent, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 9, fontWeight: 700 },
     stepText: { fontSize: 12, lineHeight: 1.6, color: C.text },
-    warnBox: {
-      background: "#2A1500", border: `1px solid #7A4000`, borderRadius: 8,
-      padding: "10px 12px", fontSize: 11, color: C.accent, marginBottom: 10, lineHeight: 1.6,
-    },
-    notesBox: {
-      background: C.bg, border: `1px solid ${C.border}`, borderRadius: 6,
-      padding: "10px 12px", fontSize: 10.5, color: C.textSub, lineHeight: 1.8, marginTop: 10,
-    },
-    memCard: {
-      background: C.surfaceRaise, border: `1px solid ${C.border}`,
-      borderRadius: 8, padding: "11px 13px", marginBottom: 8,
-    },
-    memActions: { display: "flex", gap: 6, marginTop: 10 },
-    btnPrimary: {
-      background: C.accentDim, border: `1px solid ${C.accent}`,
-      borderRadius: 6, color: C.accent, cursor: "pointer",
-      padding: "10px 16px", fontSize: 10.5, fontFamily: "monospace",
-      fontWeight: 700, letterSpacing: 1.5, flexShrink: 0,
-    },
-    btnDanger: {
-      background: C.redDim, border: `1px solid ${C.red}`,
-      borderRadius: 6, color: C.red, cursor: "pointer",
-      padding: "8px 12px", fontSize: 10, fontFamily: "monospace",
-      fontWeight: 700, letterSpacing: 1,
-    },
-    btnNeutral: {
-      background: C.surfaceHigh, border: `1px solid ${C.border}`,
-      borderRadius: 6, color: C.textSub, cursor: "pointer",
-      padding: "8px 12px", fontSize: 10, fontFamily: "monospace",
-    },
-    refSection: {
-      background: C.surfaceRaise, border: `1px solid ${C.border}`,
-      borderRadius: 8, padding: "12px 14px", marginBottom: 10,
-    },
-    refTitle: { fontSize: 9, letterSpacing: 2, color: C.textSub, textTransform: "uppercase", marginBottom: 10, fontFamily: "monospace" },
-    refRow: { display: "flex", justifyContent: "space-between", padding: "5px 0", borderBottom: `1px solid ${C.border}` },
-    refLabel: { fontSize: 10.5, color: C.textSub },
-    refVal: { fontSize: 10.5, color: C.text, fontWeight: 600 },
-    sectorBadge: (col) => ({
-      display: "inline-block", padding: "3px 12px", borderRadius: 12,
-      fontSize: 10, fontWeight: 700, letterSpacing: 1.5,
-      background: col + "18", color: col, border: `1px solid ${col}`,
-      marginBottom: 10,
-    }),
+    refSection:{ background: C.surfaceRaise, border: `1px solid ${C.border}`, borderRadius: 8, padding: "12px 14px", marginBottom: 10 },
+    refTitle:  { fontSize: 9, letterSpacing: 2, color: C.textSub, textTransform: "uppercase", marginBottom: 10, fontFamily: "monospace" },
+    refRow:    { display: "flex", justifyContent: "space-between", padding: "5px 0", borderBottom: `1px solid ${C.border}` },
   };
 
-  // ─── Render ───────────────────────────────────────────────────────────────
+  const TABS = [
+    { id: "calc",   label: "HOLD" },
+    { id: "entry",  label: "SECTORS" },
+    { id: "wind",   label: "WIND" },
+    { id: "brief",  label: "BRIEF" },
+    { id: "memory", label: "MEMORY" },
+    { id: "ref",    label: "REF" },
+  ];
+
   return (
     <div style={S.app}>
-
       {/* Header */}
       <div style={S.header}>
         <div>
-          <div style={{ fontSize: 18, fontWeight: 700, color: C.accent, letterSpacing: 3 }}>
-            ✈ HOLDMASTER
-          </div>
-          <div style={{ fontSize: 9, color: C.textSub, letterSpacing: 2, marginTop: 2 }}>
-            AU AIP ENR 1.5 · ICAO PANS-OPS
-          </div>
+          <div style={{ fontSize: 18, fontWeight: 700, color: C.accent, letterSpacing: 3 }}>✈ HOLDMASTER</div>
+          <div style={{ fontSize: 9, color: C.textSub, letterSpacing: 2, marginTop: 2 }}>AU AIP ENR 1.5 · v{VERSION}</div>
         </div>
         <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 4 }}>
-          <Pill color={C.green}>CASA COMPLIANT</Pill>
-          {Object.keys(memories).length > 0 && (
-            <Pill color={C.blue}>{Object.keys(memories).length} SAVED</Pill>
-          )}
+          <Pill color={C.green}>CASA</Pill>
+          {Object.keys(memories).length > 0 && <Pill color={C.blue}>{Object.keys(memories).length} SAVED</Pill>}
         </div>
       </div>
 
       {/* Tabs */}
       <div style={S.tabs}>
-        {[
-          { id: "calc",  label: "CALCULATOR" },
-          { id: "entry", label: "SECTOR ENTRY" },
-          { id: "wind",  label: "WIND" },
-          { id: "memory",label: "MEMORY" },
-          { id: "ref",   label: "REFERENCE" },
-        ].map(({ id, label }) => (
-          <button key={id} style={S.tab(tab === id)} onClick={() => setTab(id)}>
-            {label}
-          </button>
+        {TABS.map(({ id, label }) => (
+          <button key={id} style={S.tab(tab === id)} onClick={() => setTab(id)}>{label}</button>
         ))}
       </div>
 
       <div style={S.body}>
 
-        {/* ── CALCULATOR TAB ── */}
+        {/* ── HOLD TAB ── */}
         {tab === "calc" && (
           <>
             <Card>
               <CardTitle icon="◈">HOLD PARAMETERS</CardTitle>
-
               <div style={S.row2}>
-                <div style={S.field}>
-                  <Label>Inbound Track (°M)</Label>
-                  <Input value={inboundTrack} onChange={e => setInboundTrack(e.target.value)}
-                    placeholder="e.g. 152" />
-                </div>
-                <div style={S.field}>
-                  <Label>Altitude (ft)</Label>
-                  <Input value={altitude} onChange={e => setAltitude(e.target.value)}
-                    placeholder="e.g. 8000" />
-                </div>
+                <div style={S.field}><Label>Inbound Track (°M)</Label><Input value={inboundTrack} onChange={e => setInboundTrack(e.target.value)} placeholder="e.g. 152" /></div>
+                <div style={S.field}><Label>Altitude (ft)</Label><Input value={altitude} onChange={e => setAltitude(e.target.value)} placeholder="e.g. 8000" /></div>
               </div>
-
               <div style={{ marginBottom: 10 }}>
                 <Label>Turn Direction</Label>
                 <div style={{ display: "flex", gap: 8 }}>
@@ -661,136 +1143,109 @@ export default function HoldMaster() {
                   <SegBtn active={turnDir === "L"} onClick={() => setTurnDir("L")}>◀ LEFT</SegBtn>
                 </div>
               </div>
-
               <div style={{ marginBottom: 10 }}>
-                <Label>Aircraft Category (ICAO / AU AIP)</Label>
+                <Label>Aircraft Category</Label>
                 <Select value={cat} onChange={e => setCat(e.target.value)}>
                   {Object.entries(ICAO_CATS).map(([k, v]) => (
-                    <option key={k} value={k}>
-                      {v.label} · Vat {v.vatRange} · Max {getMaxSpeed(k, alt || 0)}kt
-                    </option>
+                    <option key={k} value={k}>{v.label} · Vat {v.vatRange} · Max {getMaxSpeed(k, alt || 0)}kt</option>
                   ))}
                 </Select>
               </div>
-
               <div style={S.row2}>
-                <div style={S.field}>
-                  <Label>TAS / IAS (knots)</Label>
-                  <Input value={tas} onChange={e => setTas(e.target.value)} placeholder="e.g. 120" />
-                </div>
-                <div style={S.field}>
-                  <Label>Charted Leg (min) or DME — override auto</Label>
-                  <Input value={chartedMin} onChange={e => setChartedMin(e.target.value)}
-                    placeholder="auto (1 or 1.5 min)" />
-                </div>
+                <div style={S.field}><Label>TAS / IAS (kt)</Label><Input value={tas} onChange={e => setTas(e.target.value)} placeholder="e.g. 120" /></div>
+                <div style={S.field}><Label>Charted Leg (min)</Label><Input value={chartedMin} onChange={e => setChartedMin(e.target.value)} placeholder="auto" /></div>
               </div>
             </Card>
+
+            {/* Hold Timer */}
+            {validBase && <HoldTimer legSecs={legSecs} outAdjSecs={outAdj?.secs} />}
 
             {validBase && (
               <Card>
                 <CardTitle icon="◈">HOLD TIMING</CardTitle>
-
-                {speedWarn && (
-                  <div style={S.warnBox}>
-                    ⚠ {tasN}kt EXCEEDS Cat {cat} limit of {maxSpd}kt at this altitude.<br />
-                    AIP ENR 1.5: reduce to ≤{maxSpd}kt BEFORE the fix.
-                  </div>
-                )}
-
-                <DataRow label="FL / ALT" value={`${alt}ft · FL${Math.round(alt / 100)}`}
-                  valueColor={alt / 100 > 140 ? C.s2 : C.green} large />
+                {speedWarn && <div style={S.warnBox}>⚠ {tasN}kt EXCEEDS Cat {cat} limit of {maxSpd}kt at this altitude.<br />AIP ENR 1.5: reduce to ≤{maxSpd}kt BEFORE the fix.</div>}
                 <DataRow label="INBOUND TRACK" value={`${norm(inb)}°M`} valueColor={C.accent} large />
                 <DataRow label="OUTBOUND HEADING" value={`${norm(inb + 180)}°M`} valueColor={C.accent} large />
                 {windCalc && <>
-                  <DataRow label="INBOUND HDG (wind corrected)"
-                    value={`${norm(inb - windCalc.wca)}°M`} valueColor={C.blue} />
-                  <DataRow label="OUTBOUND HDG (wind corrected)"
-                    value={`${norm(norm(inb + 180) - windCalc.wca * 3)}°M`} valueColor={C.blue} />
+                  <DataRow label="INBOUND HDG (corrected)" value={`${norm(inb - windCalc.wca)}°M`} valueColor={C.blue} />
+                  <DataRow label="OUTBOUND HDG (corrected)" value={`${norm(norm(inb + 180) - windCalc.wca * 3)}°M`} valueColor={C.blue} />
                 </>}
-                <DataRow label="INBOUND LEG TIME"
-                  value={alt / 100 <= 140 ? "1 MIN (≤FL140)" : "1.5 MIN (>FL140)"}
-                  valueColor={C.accent} large />
+                <DataRow label="FL / ALT" value={`${alt}ft · FL${Math.round(alt / 100)}`} valueColor={alt / 100 > 140 ? C.s2 : C.green} />
+                <DataRow label="INBOUND LEG TIME" value={alt / 100 <= 140 ? "1 MIN (≤FL140)" : "1.5 MIN (>FL140)"} valueColor={C.accent} large />
                 {outAdj
                   ? <DataRow label="ADJUSTED OUTBOUND LEG" value={fmtTime(outAdj.secs)} valueColor={C.blue} large />
                   : <DataRow label="STANDARD OUTBOUND LEG" value={fmtTime(legSecs)} />}
-                <DataRow label={`MAX HOLD SPEED · CAT ${cat}`} value={`${maxSpd} KIAS`}
-                  valueColor={speedWarn ? C.red : C.text} />
-                {hasSpeed && <DataRow label="YOUR SPEED" value={`${tasN} kt`}
-                  valueColor={speedWarn ? C.red : C.green} />}
+                <DataRow label={`MAX SPEED · CAT ${cat}`} value={`${maxSpd} KIAS`} valueColor={speedWarn ? C.red : C.text} />
+                {hasSpeed && <DataRow label="YOUR SPEED" value={`${tasN} kt`} valueColor={speedWarn ? C.red : C.green} />}
                 {outAdj && <>
                   <DataRow label="GS INBOUND" value={`${outAdj.gsIn} kt`} valueColor={C.blue} />
                   <DataRow label="GS OUTBOUND" value={`${outAdj.gsOut} kt`} valueColor={C.blue} />
                   <DataRow label="TARGET INBOUND DIST" value={`${outAdj.distNM} NM`} valueColor={C.blue} />
                 </>}
                 {windCalc && <>
-                  <DataRow label="INBOUND WCA" value={`${windCalc.wca > 0 ? "+" : ""}${windCalc.wca}°`}
-                    valueColor={C.blue} />
-                  <DataRow label="OUTBOUND WCA (×3)"
-                    value={`${windCalc.wca * 3 > 0 ? "+" : ""}${windCalc.wca * 3}°`}
-                    valueColor={C.blue} />
+                  <DataRow label="INBOUND WCA" value={`${windCalc.wca > 0 ? "+" : ""}${windCalc.wca}°`} valueColor={C.blue} />
+                  <DataRow label="OUTBOUND WCA (×3)" value={`${windCalc.wca * 3 > 0 ? "+" : ""}${windCalc.wca * 3}°`} valueColor={C.blue} />
                 </>}
-
                 <div style={S.notesBox}>
                   <div>• Timing starts ABEAM the fix or wings level after turn — whichever is later.</div>
                   <div>• Obtain inbound track BEFORE crossing the fix inbound. (ENR 1.5 para 3.1.5)</div>
                   <div>• Turns: standard rate; max bank 30° (flight director: 25°).</div>
-                  {entry && <div>• Sector 2 max outbound: 1.5 min even if chart shows 1 min.</div>}
+                  {entry && entry.sector === 2 && <div>• S2 max outbound: 1.5 min even if chart shows 1 min.</div>}
                 </div>
               </Card>
             )}
 
-            {/* Quick sector summary if computed */}
-            {entry && (
-              <Card style={{ borderColor: entry.borderColor }}>
-                <CardTitle icon="◈">SECTOR ENTRY SUMMARY</CardTitle>
-                <div style={S.sectorBadge(entry.color)}>{entry.badge}</div>
-                <div style={{ fontSize: 12, color: C.textSub, marginBottom: 8 }}>
-                  AC hdg {norm(hdg)}°M on inbound {norm(inb)}°M — {turnDir === "R" ? "right-hand" : "left-hand"} hold.
+            {/* Fuel */}
+            <Card>
+              <CardTitle icon="⛽">FUEL ENDURANCE IN HOLD</CardTitle>
+              <div style={S.row2}>
+                <div style={S.field}><Label>Fuel Flow (per hr)</Label><Input value={fuelFlow} onChange={e => setFuelFlow(e.target.value)} placeholder="e.g. 30" /></div>
+                <div style={S.field}>
+                  <Label>Unit</Label>
+                  <div style={{ display: "flex", gap: 6 }}>
+                    <SegBtn active={fuelUnit === "L"} onClick={() => setFuelUnit("L")}>L/HR</SegBtn>
+                    <SegBtn active={fuelUnit === "kg"} onClick={() => setFuelUnit("kg")}>KG/HR</SegBtn>
+                  </div>
                 </div>
-                <ul style={{ margin: 0, padding: 0, listStyle: "none" }}>
-                  {entry.procedure.map((step, i) => (
-                    <li key={i} style={S.stepItem}>
-                      <span style={S.stepNum}>{i + 1}</span>
-                      <span style={S.stepText}>{step}</span>
-                    </li>
-                  ))}
-                </ul>
-                <div style={{ ...S.notesBox, marginTop: 10 }}>
-                  <div>Tap <strong style={{ color: C.accent }}>SECTOR ENTRY</strong> tab for the full diagram.</div>
-                </div>
-              </Card>
-            )}
+              </div>
+              <div style={{ marginBottom: 10 }}>
+                <Label>Available Fuel Above Reserve ({fuelUnit})</Label>
+                <Input value={fuelReserve} onChange={e => setFuelReserve(e.target.value)} placeholder="e.g. 45" />
+              </div>
+              {hasFuel && lapMins && fuelPerLap && (
+                <>
+                  <DataRow label="FUEL PER LAP" value={`${fuelPerLap.toFixed(1)} ${fuelUnit}`} valueColor={C.accent} />
+                  <DataRow label="EST. LAP TIME" value={fmtTime(Math.round(lapSecs))} />
+                  {lapsAvail !== null && <DataRow label="LAPS AVAILABLE" value={lapsAvail} valueColor={lapsAvail <= 2 ? C.red : lapsAvail <= 4 ? C.s2 : C.green} large />}
+                  {enduranceMins && <DataRow label="HOLD ENDURANCE" value={`${enduranceMins} MIN`} valueColor={C.blue} large />}
+                </>
+              )}
+            </Card>
 
-                        {/* Hold Card — kneeboard summary */}
+            {/* Hold Card */}
             {validBase && (
               <Card style={{ borderColor: C.accent + "44", background: C.surfaceHigh }}>
                 <CardTitle icon="✈">HOLD CARD</CardTitle>
-                <div style={{
-                  display: "grid", gridTemplateColumns: "1fr 1fr",
-                  gap: "8px 16px", fontFamily: "monospace",
-                }}>
+                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "8px 16px", fontFamily: "monospace" }}>
                   {[
-                    { l: "FIX INBOUND",   v: `${norm(inb)}°M`,             c: C.accent },
-                    { l: "OUTBOUND",      v: `${norm(inb + 180)}°M`,        c: C.accent },
-                    { l: "TURN",          v: turnDir === "R" ? "RIGHT ▶" : "◀ LEFT", c: C.green },
-                    { l: "CAT",           v: cat,                            c: C.text },
-                    { l: "ALT",           v: `${alt}ft / FL${Math.round(alt/100)}`, c: alt/100>140?C.s2:C.green },
-                    { l: "LEG TIME",      v: alt/100<=140?"1 MIN":"1.5 MIN", c: C.accent },
+                    { l: "FIX INBOUND",    v: `${norm(inb)}°M`,             c: C.accent },
+                    { l: "OUTBOUND",       v: `${norm(inb + 180)}°M`,        c: C.accent },
+                    { l: "TURN",           v: turnDir === "R" ? "RIGHT ▶" : "◀ LEFT", c: C.green },
+                    { l: "CAT",            v: cat,                            c: C.text },
+                    { l: "ALT",            v: `${alt}ft / FL${Math.round(alt / 100)}`, c: alt / 100 > 140 ? C.s2 : C.green },
+                    { l: "LEG TIME",       v: alt / 100 <= 140 ? "1 MIN" : "1.5 MIN", c: C.accent },
                     ...(outAdj ? [
-                      { l: "OBD LEG (adj)", v: fmtTime(outAdj.secs),       c: C.blue },
-                      { l: "DIST",          v: `${outAdj.distNM} NM`,       c: C.blue },
-                    ] : [
-                      { l: "OBD LEG",     v: fmtTime(legSecs),             c: C.text },
-                    ]),
-                    { l: "MAX SPEED",     v: `${maxSpd} kt`,                c: speedWarn ? C.red : C.text },
+                      { l: "OBD LEG (adj)", v: fmtTime(outAdj.secs), c: C.blue },
+                      { l: "DIST",          v: `${outAdj.distNM} NM`, c: C.blue },
+                    ] : [{ l: "OBD LEG", v: fmtTime(legSecs), c: C.text }]),
+                    { l: "MAX SPEED", v: `${maxSpd} kt`, c: speedWarn ? C.red : C.text },
                     ...(windCalc ? [
-                      { l: "IBD HDG",     v: `${norm(inb - windCalc.wca)}°M`, c: C.blue },
-                      { l: "OBD HDG",     v: `${norm(norm(inb+180) - windCalc.wca*3)}°M`, c: C.blue },
-                      { l: "WCA ×3",      v: `${windCalc.wca*3>0?"+":""}${windCalc.wca*3}°`, c: C.blue },
+                      { l: "IBD HDG",  v: `${norm(inb - windCalc.wca)}°M`,                  c: C.blue },
+                      { l: "OBD HDG",  v: `${norm(norm(inb + 180) - windCalc.wca * 3)}°M`,  c: C.blue },
+                      { l: "WCA ×3",   v: `${windCalc.wca * 3 > 0 ? "+" : ""}${windCalc.wca * 3}°`, c: C.blue },
                     ] : []),
-                    ...(entry ? [
-                      { l: "ENTRY",       v: entry.badge,                   c: entry.color },
-                    ] : []),
+                    ...(entry ? [{ l: "ENTRY", v: entry.badge, c: entry.color }] : []),
+                    ...(lapsAvail !== null ? [{ l: "LAPS", v: String(lapsAvail), c: lapsAvail <= 2 ? C.red : C.green }] : []),
                   ].map(({ l, v, c }) => (
                     <div key={l} style={{ display: "flex", flexDirection: "column", gap: 2 }}>
                       <span style={{ fontSize: 8, color: C.textSub, letterSpacing: 1.5, textTransform: "uppercase" }}>{l}</span>
@@ -801,21 +1256,28 @@ export default function HoldMaster() {
               </Card>
             )}
 
-            {/* Save to Memory */}
+            {/* Entry summary */}
+            {entry && (
+              <Card style={{ borderColor: entry.borderColor }}>
+                <CardTitle icon="◈">SECTOR ENTRY SUMMARY</CardTitle>
+                <div style={S.sectorBadge(entry.color)}>{entry.badge}</div>
+                <ul style={{ margin: 0, padding: 0, listStyle: "none" }}>
+                  {entry.procedure.map((step, i) => (
+                    <li key={i} style={S.stepItem}>
+                      <span style={S.stepNum}>{i + 1}</span>
+                      <span style={S.stepText}>{step}</span>
+                    </li>
+                  ))}
+                </ul>
+              </Card>
+            )}
+
+            {/* Save */}
             <Card>
-              <CardTitle icon="◈">SAVE TO MEMORY BANK</CardTitle>
+              <CardTitle icon="◈">SAVE TO MEMORY</CardTitle>
               <div style={S.row2}>
-                <div style={{ flex: 1 }}>
-                  <Label>Label (airport / fix, e.g. YMAV · YMML-VOR)</Label>
-                  <Input type="text" value={saveKey}
-                    onChange={e => setSaveKey(e.target.value.toUpperCase())}
-                    placeholder="e.g. YMAV" />
-                </div>
-                <button
-                  style={{ ...S.btnPrimary, alignSelf: "flex-end", marginBottom: 0 }}
-                  onClick={saveMemory}
-                  disabled={!validBase || !saveKey.trim()}
-                >
+                <div style={{ flex: 1 }}><Label>Airport / Fix Label</Label><Input type="text" value={saveKey} onChange={e => setSaveKey(e.target.value.toUpperCase())} placeholder="e.g. YMAV" /></div>
+                <button style={{ ...S.btnPrim, alignSelf: "flex-end" }} onClick={saveMemory} disabled={!validBase || !saveKey.trim()}>
                   {saved ? "✓ SAVED" : "SAVE"}
                 </button>
               </div>
@@ -823,66 +1285,34 @@ export default function HoldMaster() {
           </>
         )}
 
-        {/* ── SECTOR ENTRY TAB ── */}
+        {/* ── SECTORS TAB ── */}
         {tab === "entry" && (
           <>
             <Card>
-              <CardTitle icon="◈">AIRCRAFT HEADING AT FIX</CardTitle>
+              <CardTitle icon="◈">SECTOR ENTRY</CardTitle>
               <div style={S.row2}>
-                <div style={S.field}>
-                  <Label>Inbound Track (°M)</Label>
-                  <Input value={inboundTrack} onChange={e => setInboundTrack(e.target.value)}
-                    placeholder="e.g. 152" />
-                </div>
-                <div style={S.field}>
-                  <Label>Turn Direction</Label>
+                <div style={S.field}><Label>Inbound Track (°M)</Label><Input value={inboundTrack} onChange={e => setInboundTrack(e.target.value)} placeholder="e.g. 152" /></div>
+                <div style={S.field}><Label>Turn Direction</Label>
                   <div style={{ display: "flex", gap: 6 }}>
                     <SegBtn active={turnDir === "R"} onClick={() => setTurnDir("R")}>R</SegBtn>
                     <SegBtn active={turnDir === "L"} onClick={() => setTurnDir("L")}>L</SegBtn>
                   </div>
                 </div>
               </div>
-              <div>
-                <Label>AC Heading at Fix (°M)</Label>
-                <Input value={acHdg} onChange={e => setAcHdg(e.target.value)}
-                  placeholder="e.g. 342" />
-              </div>
-              <div style={{ fontSize: 10, color: C.textSub, marginTop: 8 }}>
-                AIP ENR 1.5 para 3.4.1 — sector entry is determined by <strong style={{ color: C.text }}>heading</strong>, not ground track.
-              </div>
+              <div><Label>AC Heading at Fix (°M)</Label><Input value={acHdg} onChange={e => setAcHdg(e.target.value)} placeholder="e.g. 342" /></div>
+              <div style={{ fontSize: 10, color: C.textSub, marginTop: 8 }}>AIP ENR 1.5 para 3.4.1 — based on <strong style={{ color: C.text }}>heading</strong>, not ground track.</div>
             </Card>
-
-            {/* Diagram */}
             {!isNaN(inb) && (
               <Card>
-                <CardTitle icon="◈">HOLDING PATTERN SECTORS</CardTitle>
-                <HoldDiagram
-                  inboundTrack={inb}
-                  turnDir={turnDir}
-                  sector={entry?.sector ?? null}
-                  acHdg={hasHdg ? hdg : null}
-                />
-
-                {/* Sector Legend */}
+                <CardTitle icon="◈">DIAGRAM</CardTitle>
+                <HoldDiagram inboundTrack={inb} turnDir={turnDir} sector={entry?.sector ?? null} acHdg={!isNaN(hdg) ? hdg : null} />
                 <div style={{ display: "flex", gap: 8, justifyContent: "center", marginTop: 10, flexWrap: "wrap" }}>
-                  {[
-                    { n: 1, label: "S1 PARALLEL", col: C.s1 },
-                    { n: 2, label: "S2 OFFSET", col: C.s2 },
-                    { n: 3, label: "S3 DIRECT", col: C.s3 },
-                  ].map(({ n, label, col }) => (
-                    <span key={n} style={{
-                      ...S.sectorBadge(col),
-                      marginBottom: 0,
-                      opacity: entry ? (entry.sector === n ? 1 : 0.4) : 1,
-                    }}>
-                      {label}
-                    </span>
+                  {[{ n: 1, label: "S1 PARALLEL", col: C.s1 }, { n: 2, label: "S2 OFFSET", col: C.s2 }, { n: 3, label: "S3 DIRECT", col: C.s3 }].map(({ n, label, col }) => (
+                    <span key={n} style={{ ...S.sectorBadge(col), marginBottom: 0, opacity: entry ? (entry.sector === n ? 1 : 0.4) : 1 }}>{label}</span>
                   ))}
                 </div>
               </Card>
             )}
-
-            {/* Entry procedure */}
             {entry && (
               <Card style={{ borderColor: entry.borderColor }}>
                 <CardTitle icon="◈">{entry.name.toUpperCase()}</CardTitle>
@@ -895,45 +1325,10 @@ export default function HoldMaster() {
                     </li>
                   ))}
                 </ul>
-
                 <div style={{ ...S.notesBox, marginTop: 12 }}>
-                  <div style={{ fontWeight: 700, color: C.text, marginBottom: 4 }}>
-                    Sector Boundaries (this hold):
-                  </div>
-                  <div>Outbound: {norm(inb + 180)}°M · Fix: {norm(inb)}°M inbound</div>
-                  <div>S3/S1 line: {norm(norm(inb + 180) + (turnDir === "R" ? 110 : -110))}°M from fix</div>
-                  <div>S1/S2 line: {norm(norm(inb + 180) + (turnDir === "R" ? 290 : -290))}°M from fix</div>
-                  {entry.offsetHeading && (
-                    <div style={{ marginTop: 4, color: C.accent }}>
-                      Offset heading (S2): {entry.offsetHeading}°M
-                    </div>
-                  )}
+                  <div>Outbound: {norm(inb + 180)}°M · S3/S1 line: {norm(norm(inb + 180) + (turnDir === "R" ? 110 : -110))}°M · S1/S2 line: {norm(norm(inb + 180) + (turnDir === "R" ? 290 : -290))}°M</div>
+                  {entry.offsetHeading && <div style={{ color: C.accent }}>Offset heading (S2): {entry.offsetHeading}°M</div>}
                 </div>
-              </Card>
-            )}
-
-            {/* All 3 entries explained */}
-            {!isNaN(inb) && (
-              <Card>
-                <CardTitle icon="◈">ALL THREE ENTRIES · {norm(inb)}°M INBOUND</CardTitle>
-                {[
-                  { sector: 1, acHdgExample: norm(norm(inb + 180) + (turnDir === "R" ? 200 : -200)) },
-                  { sector: 2, acHdgExample: norm(norm(inb + 180) + (turnDir === "R" ? 320 : -320)) },
-                  { sector: 3, acHdgExample: norm(norm(inb + 180) + (turnDir === "R" ? 55 : -55)) },
-                ].map(({ sector: s, acHdgExample }) => {
-                  const e = getSectorEntry(acHdgExample, inb, turnDir);
-                  return (
-                    <div key={s} style={{
-                      background: C.bg, borderRadius: 6, padding: "10px 12px",
-                      border: `1px solid ${e.borderColor}`, marginBottom: 8,
-                    }}>
-                      <div style={{ ...S.sectorBadge(e.color), marginBottom: 6 }}>{e.badge}</div>
-                      <div style={{ fontSize: 11, color: C.textSub, lineHeight: 1.6 }}>
-                        {e.procedure[0]}
-                      </div>
-                    </div>
-                  );
-                })}
               </Card>
             )}
           </>
@@ -945,86 +1340,53 @@ export default function HoldMaster() {
             <Card>
               <CardTitle icon="◈">WIND INPUT</CardTitle>
               <div style={S.row2}>
-                <div style={S.field}>
-                  <Label>Inbound Track (°M)</Label>
-                  <Input value={inboundTrack} onChange={e => setInboundTrack(e.target.value)}
-                    placeholder="e.g. 152" />
-                </div>
-                <div style={S.field}>
-                  <Label>TAS (knots)</Label>
-                  <Input value={tas} onChange={e => setTas(e.target.value)}
-                    placeholder="e.g. 120" />
-                </div>
+                <div style={S.field}><Label>Inbound Track (°M)</Label><Input value={inboundTrack} onChange={e => setInboundTrack(e.target.value)} placeholder="e.g. 152" /></div>
+                <div style={S.field}><Label>TAS (kt)</Label><Input value={tas} onChange={e => setTas(e.target.value)} placeholder="e.g. 120" /></div>
               </div>
               <div style={S.row2}>
-                <div style={S.field}>
-                  <Label>Wind Direction (°T)</Label>
-                  <Input value={windDir} onChange={e => setWindDir(e.target.value)}
-                    placeholder="e.g. 270" />
-                </div>
-                <div style={S.field}>
-                  <Label>Wind Speed (knots)</Label>
-                  <Input value={windSpd} onChange={e => setWindSpd(e.target.value)}
-                    placeholder="e.g. 20" />
-                </div>
+                <div style={S.field}><Label>Wind Direction (°T)</Label><Input value={windDir} onChange={e => setWindDir(e.target.value)} placeholder="e.g. 270" /></div>
+                <div style={S.field}><Label>Wind Speed (kt)</Label><Input value={windSpd} onChange={e => setWindSpd(e.target.value)} placeholder="e.g. 20" /></div>
               </div>
             </Card>
-
             {hasWind && windCalc && (
               <>
                 <Card>
                   <CardTitle icon="◈">INBOUND LEG</CardTitle>
-                  <DataRow label="WIND COMPONENT" value={
-                    windCalc.hw >= 0
-                      ? `↗ TAILWIND ${windCalc.hw}kt`
-                      : `↙ HEADWIND ${Math.abs(windCalc.hw)}kt`
-                  } valueColor={windCalc.hw >= 0 ? C.green : C.red} large />
+                  <DataRow label="WIND COMPONENT" value={windCalc.hw >= 0 ? `↗ TAILWIND ${windCalc.hw}kt` : `↙ HEADWIND ${Math.abs(windCalc.hw)}kt`} valueColor={windCalc.hw >= 0 ? C.green : C.red} large />
                   <DataRow label="CROSSWIND" value={`${Math.abs(windCalc.xw)}kt`} />
-                  <DataRow label="WCA (INBOUND)" value={`${windCalc.wca > 0 ? "+" : ""}${windCalc.wca}°`}
-                    valueColor={C.blue} />
-                  <DataRow label="INBOUND HEADING"
-                    value={`${norm(inb + windCalc.wca)}°M`}
-                    valueColor={C.accent} large />
-                  <DataRow label="GS INBOUND (approx)" value={`${windCalc.gsInbound}kt`} />
+                  <DataRow label="WCA (INBOUND)" value={`${windCalc.wca > 0 ? "+" : ""}${windCalc.wca}°`} valueColor={C.blue} />
+                  <DataRow label="INBOUND HEADING" value={`${norm(inb - windCalc.wca)}°M`} valueColor={C.accent} large />
+                  <DataRow label="GS INBOUND" value={`${windCalc.gsInbound}kt`} />
                 </Card>
-
                 <Card>
                   <CardTitle icon="◈">OUTBOUND LEG</CardTitle>
-                  <DataRow label="WCA (OUTBOUND = ×3 inbound)" value={`${windCalc.wca * 3 > 0 ? "+" : ""}${windCalc.wca * 3}°`}
-                    valueColor={C.blue} />
-                  <DataRow label="OUTBOUND HEADING"
-                    value={`${norm(norm(inb + 180) + windCalc.wca * 3)}°M`}
-                    valueColor={C.accent} large />
-                  <DataRow label="ADJUSTED OUTBOUND TIME"
-                    value={outAdj ? fmtTime(outAdj.secs) : "—"}
-                    valueColor={C.blue} large />
+                  <DataRow label="WCA OUTBOUND (×3 inbound)" value={`${windCalc.wca * 3 > 0 ? "+" : ""}${windCalc.wca * 3}°`} valueColor={C.blue} />
+                  <DataRow label="OUTBOUND HEADING" value={`${norm(norm(inb + 180) - windCalc.wca * 3)}°M`} valueColor={C.accent} large />
+                  <DataRow label="ADJUSTED OUTBOUND TIME" value={outAdj ? fmtTime(outAdj.secs) : "—"} valueColor={C.blue} large />
                   {outAdj && <>
-                    <DataRow label="GS OUTBOUND (approx)" value={`${outAdj.gsOut}kt`} />
+                    <DataRow label="GS OUTBOUND" value={`${outAdj.gsOut}kt`} />
                     <DataRow label="TARGET INBOUND DIST" value={`${outAdj.distNM} NM`} valueColor={C.blue} />
                   </>}
                 </Card>
-
                 <Card>
-                  <CardTitle icon="◈">WIND CORRECTION NOTES</CardTitle>
+                  <CardTitle icon="◈">NOTES</CardTitle>
                   <div style={S.notesBox}>
-                    <div>• Apply WCA on INBOUND: track {norm(inb)}°M → heading {norm(inb + windCalc.wca)}°M.</div>
-                    <div>• Apply TRIPLE WCA on OUTBOUND: hdg {norm(norm(inb + 180) + windCalc.wca * 3)}°M.</div>
+                    <div>• Apply WCA on INBOUND: track {norm(inb)}°M → heading {norm(inb - windCalc.wca)}°M.</div>
+                    <div>• Apply TRIPLE WCA on OUTBOUND: hdg {norm(norm(inb + 180) - windCalc.wca * 3)}°M.</div>
                     <div>• Adjust outbound timing so inbound leg = {legSecs ? fmtTime(legSecs) : "—"}.</div>
-                    <div>• Lateral drift: re-evaluate each lap and refine corrections.</div>
-                    <div>• (AU AIP ENR 1.5 para 3.1.4 — wind effect in holding)</div>
+                    <div>• Lateral drift: re-evaluate each lap and refine WCA.</div>
+                    <div>• (AU AIP ENR 1.5 para 3.1.4)</div>
                   </div>
                 </Card>
               </>
             )}
-
-            {!hasWind && (
-              <Card>
-                <div style={{ color: C.textSub, fontSize: 12, textAlign: "center", padding: 20 }}>
-                  Enter inbound track, TAS, and wind to see corrections.
-                </div>
-              </Card>
-            )}
+            {!hasWind && <Card><div style={{ color: C.textSub, fontSize: 12, textAlign: "center", padding: 20 }}>Enter inbound track, TAS, and wind to see corrections.</div></Card>}
           </>
+        )}
+
+        {/* ── APPROACH BRIEF TAB ── */}
+        {tab === "brief" && (
+          <ApproachBriefTab windCalc={windCalc} sectorEntryFromCalc={entry} />
         )}
 
         {/* ── MEMORY TAB ── */}
@@ -1032,21 +1394,13 @@ export default function HoldMaster() {
           <>
             <Card>
               <CardTitle icon="◈">MEMORY BANK</CardTitle>
-              <Input type="text" value={memSearch}
-                onChange={e => setMemSearch(e.target.value)}
-                placeholder="Search airport / label…" />
+              <Input type="text" value={memSearch} onChange={e => setMemSearch(e.target.value)} placeholder="Search airport / label…" />
             </Card>
-
             {memKeys.length === 0 && (
-              <Card>
-                <div style={{ textAlign: "center", color: C.textMuted, padding: 24, fontSize: 12 }}>
-                  {Object.keys(memories).length === 0
-                    ? "No holds saved yet.\nUse CALCULATOR tab to set up and save a hold."
-                    : "No results for that search."}
-                </div>
-              </Card>
+              <Card><div style={{ textAlign: "center", color: C.textMuted, padding: 24, fontSize: 12 }}>
+                {Object.keys(memories).length === 0 ? "No holds saved yet." : "No results."}
+              </div></Card>
             )}
-
             {memKeys.map(k => {
               const m = memories[k];
               const sc = m.sector;
@@ -1054,45 +1408,31 @@ export default function HoldMaster() {
               const fl = m.altitude ? Math.round(m.altitude / 100) : null;
               return (
                 <div key={k} style={S.memCard}>
-                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start" }}>
-                    <div>
-                      <div style={{ fontSize: 17, fontWeight: 700, color: C.accent, marginBottom: 6 }}>{k}</div>
-                      <div style={{ display: "flex", gap: 5, flexWrap: "wrap", marginBottom: 6 }}>
-                        {m.inboundTrack && <Pill color={C.blue}>INBOUND {m.inboundTrack}°M</Pill>}
-                        {fl && <Pill color={C.textSub}>FL{fl}</Pill>}
-                        {m.cat && <Pill color={C.green}>CAT {m.cat}</Pill>}
-                        {sc && <Pill color={scCol}>S{sc}</Pill>}
-                        {m.turnDir && <Pill color={m.turnDir === "R" ? C.green : C.s2}>{m.turnDir === "R" ? "R/H" : "L/H"}</Pill>}
-                        {m.tas && <Pill color={C.textSub}>{m.tas}kt</Pill>}
-                        {m.maxSpd && <Pill color={C.red}>MAX {m.maxSpd}kt</Pill>}
+                  <div>
+                    <div style={{ fontSize: 17, fontWeight: 700, color: C.accent, marginBottom: 6 }}>{k}</div>
+                    <div style={{ display: "flex", gap: 5, flexWrap: "wrap", marginBottom: 6 }}>
+                      {m.inboundTrack && <Pill color={C.blue}>INBOUND {m.inboundTrack}°M</Pill>}
+                      {fl && <Pill color={C.textSub}>FL{fl}</Pill>}
+                      {m.cat && <Pill color={C.green}>CAT {m.cat}</Pill>}
+                      {sc && <Pill color={scCol}>S{sc}</Pill>}
+                      {m.turnDir && <Pill color={m.turnDir === "R" ? C.green : C.s2}>{m.turnDir === "R" ? "R/H" : "L/H"}</Pill>}
+                      {m.maxSpd && <Pill color={C.red}>MAX {m.maxSpd}kt</Pill>}
+                    </div>
+                    <div style={{ ...S.notesBox, marginTop: 8 }}>
+                      {m.inboundTrack && <div>Inbound {m.inboundTrack}°M → Outbound {norm(m.inboundTrack + 180)}°M</div>}
+                      {m.altitude && <div>Alt {m.altitude}ft — leg: {m.altitude / 100 <= 140 ? "1 min" : "1.5 min"}</div>}
+                      {m.windDir != null && <div>Wind: {m.windDir}°/{m.windSpd}kt</div>}
+                      <div style={{ color: C.textMuted, fontSize: 9, marginTop: 4 }}>
+                        Saved {new Date(m.savedAt).toLocaleString("en-AU", { dateStyle: "short", timeStyle: "short" })}
                       </div>
-                      {m.sectorName && (
-                        <div style={{ fontSize: 10, color: scCol }}>{m.sectorName}</div>
-                      )}
                     </div>
                   </div>
-
-                  {/* Compact hold summary */}
-                  <div style={{ ...S.notesBox, marginTop: 8 }}>
-                    {m.inboundTrack && <div>Inbound {m.inboundTrack}°M → Outbound {norm(m.inboundTrack + 180)}°M</div>}
-                    {m.altitude && <div>Alt {m.altitude}ft — leg: {m.altitude / 100 <= 140 ? "1 min" : "1.5 min"}</div>}
-                    {m.windDir != null && m.windSpd != null && (
-                      <div>Wind: {m.windDir}°/{m.windSpd}kt</div>
-                    )}
-                    <div style={{ color: C.textMuted, fontSize: 9, marginTop: 4 }}>
-                      Saved {new Date(m.savedAt).toLocaleString("en-AU", { dateStyle: "short", timeStyle: "short" })}
-                    </div>
-                  </div>
-
-                  <div style={S.memActions}>
-                    <button style={S.btnPrimary} onClick={() => loadMemory(k)}>LOAD</button>
+                  <div style={{ display: "flex", gap: 6, marginTop: 10 }}>
+                    <button style={S.btnPrim} onClick={() => loadMemory(k)}>LOAD</button>
                     {deleteConfirm === k
-                      ? <>
-                          <button style={S.btnDanger} onClick={() => delMemory(k)}>CONFIRM DELETE</button>
-                          <button style={S.btnNeutral} onClick={() => setDeleteConfirm(null)}>CANCEL</button>
-                        </>
-                      : <button style={S.btnDanger} onClick={() => setDeleteConfirm(k)}>DELETE</button>
-                    }
+                      ? <><button style={S.btnDanger} onClick={() => delMemory(k)}>CONFIRM</button>
+                          <button style={S.btnNeutral} onClick={() => setDeleteConfirm(null)}>CANCEL</button></>
+                      : <button style={S.btnDanger} onClick={() => setDeleteConfirm(k)}>DELETE</button>}
                   </div>
                 </div>
               );
@@ -1105,126 +1445,82 @@ export default function HoldMaster() {
           <>
             <Card>
               <CardTitle icon="◈">AU AIP ENR 1.5 SPEED LIMITS</CardTitle>
-              <div style={S.notesBox}>
-                Maximum IAS for holding, by ICAO category and altitude. (PANS-OPS Doc 8168)
-              </div>
               {Object.entries(ICAO_CATS).map(([k, v]) => (
                 <div key={k} style={S.refSection}>
                   <div style={S.refTitle}>{v.label} · Vat {v.vatRange}</div>
-                  <div style={S.refRow}>
-                    <span style={S.refLabel}>≤ FL140 (≤14,000ft)</span>
-                    <span style={{ ...S.refVal, color: C.accent }}>{v.maxBelow14k} KIAS MAX</span>
-                  </div>
-                  <div style={{ ...S.refRow, borderBottom: "none" }}>
-                    <span style={S.refLabel}>&gt; FL140</span>
-                    <span style={{ ...S.refVal, color: C.accent }}>{v.maxAbove14k} KIAS MAX</span>
-                  </div>
+                  <div style={S.refRow}><span style={{ fontSize: 10.5, color: C.textSub }}>≤ FL140</span><span style={{ fontSize: 10.5, color: C.accent, fontWeight: 600 }}>{v.maxBelow14k} KIAS MAX</span></div>
+                  <div style={{ ...S.refRow, borderBottom: "none" }}><span style={{ fontSize: 10.5, color: C.textSub }}>&gt; FL140</span><span style={{ fontSize: 10.5, color: C.accent, fontWeight: 600 }}>{v.maxAbove14k} KIAS MAX</span></div>
                 </div>
               ))}
             </Card>
-
             <Card>
               <CardTitle icon="◈">LEG TIMING</CardTitle>
-              <div style={S.refRow}>
-                <span style={S.refLabel}>≤ FL140 (≤14,000ft)</span>
-                <span style={{ ...S.refVal, color: C.accent }}>1 MINUTE outbound</span>
-              </div>
-              <div style={{ ...S.refRow }}>
-                <span style={S.refLabel}>&gt; FL140</span>
-                <span style={{ ...S.refVal, color: C.accent }}>1.5 MINUTES outbound</span>
-              </div>
-              <div style={{ ...S.refRow, borderBottom: "none" }}>
-                <span style={S.refLabel}>Sector 2 (offset) max</span>
-                <span style={{ ...S.refVal, color: C.s2 }}>1.5 MIN (overrides chart)</span>
-              </div>
-              <div style={S.notesBox}>
-                Timing starts ABEAM the fix or at completion of turn — whichever is later. (ENR 1.5 para 3.1.2)
-              </div>
+              <DataRow label="≤ FL140" value="1 MIN outbound" valueColor={C.accent} />
+              <DataRow label="> FL140" value="1.5 MIN outbound" valueColor={C.accent} />
+              <DataRow label="S2 (offset) max" value="1.5 MIN (overrides chart)" valueColor={C.s2} />
+              <div style={S.notesBox}>Timing from ABEAM fix or wings level — whichever is later. (ENR 1.5 para 3.1.2)</div>
             </Card>
-
             <Card>
-              <CardTitle icon="◈">SECTOR ENTRY DEFINITIONS</CardTitle>
+              <CardTitle icon="◈">SECTOR DEFINITIONS</CardTitle>
               {[
-                {
-                  sector: "S1 · PARALLEL", col: C.s1,
-                  lines: [
-                    "Aircraft heading within 180° arc on the NON-HOLDING side of the outbound.",
-                    "Cross fix → fly parallel to inbound (non-holding side).",
-                    "Turn holding-side (>180°) to intercept inbound.",
-                  ]
-                },
-                {
-                  sector: "S2 · OFFSET", col: C.s2,
-                  lines: [
-                    "Aircraft heading within 70° arc on the HOLDING SIDE of outbound.",
-                    "Cross fix → fly 30° offset from outbound toward holding side.",
-                    "Max outbound: 1.5 min (even if chart shows 1 min).",
-                    "Turn to intercept inbound.",
-                  ]
-                },
-                {
-                  sector: "S3 · DIRECT", col: C.s3,
-                  lines: [
-                    "Aircraft heading within 110° arc on non-holding side of outbound.",
-                    "Cross fix → immediately turn holding side.",
-                    "Fly outbound, then turn to inbound.",
-                  ]
-                },
+                { sector: "S1 · PARALLEL", col: C.s1, lines: ["Non-holding side, 180° arc of outbound direction.", "Cross fix → fly parallel to inbound on non-holding side.", "Turn holding-side (>180°) to intercept inbound."] },
+                { sector: "S2 · OFFSET", col: C.s2, lines: ["Holding side, within 70° of outbound.", "Cross fix → fly 30° offset toward holding side.", "Max outbound: 1.5 min (even if chart shows 1 min).", "Turn to intercept inbound."] },
+                { sector: "S3 · DIRECT", col: C.s3, lines: ["Within 110° of outbound on non-holding side.", "Cross fix → immediately turn holding side.", "Fly outbound, then turn to inbound."] },
               ].map(({ sector: s, col, lines }) => (
                 <div key={s} style={{ ...S.refSection, borderColor: col }}>
                   <div style={{ ...S.refTitle, color: col }}>{s}</div>
-                  {lines.map((l, i) => (
-                    <div key={i} style={{ fontSize: 11, color: i === 0 ? C.text : C.textSub, marginBottom: 4 }}>{l}</div>
-                  ))}
+                  {lines.map((l, i) => <div key={i} style={{ fontSize: 11, color: i === 0 ? C.text : C.textSub, marginBottom: 4 }}>{l}</div>)}
                 </div>
               ))}
             </Card>
-
+            <Card>
+              <CardTitle icon="◈">ATC PHRASEOLOGY</CardTitle>
+              {[
+                { label: "Entering hold", text: "[Callsign], entering the hold at [fix], [altitude]." },
+                { label: "Expecting further clearance", text: "[Callsign], request EFC time at [fix]." },
+                { label: "Unable to hold (speed)", text: "[Callsign], unable to comply with holding speed, request [alternative]." },
+                { label: "Leaving hold", text: "[Callsign], leaving the hold at [fix], proceeding [destination/track]." },
+                { label: "Request approach", text: "[Callsign], request [approach type] approach runway [XX], [fix]." },
+                { label: "Missed approach", text: "[Callsign], going around, [missed approach track], climbing to [altitude]." },
+              ].map(({ label, text }) => (
+                <div key={label} style={{ marginBottom: 10 }}>
+                  <div style={{ fontSize: 9, letterSpacing: 1.5, color: C.textSub, textTransform: "uppercase", marginBottom: 4 }}>{label}</div>
+                  <div style={{ fontSize: 11, color: C.text, background: C.bg, borderRadius: 5, padding: "8px 10px", fontFamily: "monospace", lineHeight: 1.5 }}>{text}</div>
+                </div>
+              ))}
+            </Card>
             <Card>
               <CardTitle icon="◈">GENERAL RULES</CardTitle>
               <div style={S.notesBox}>
-                <div>• Standard hold = RIGHT turns (unless chart specifies left). (ENR 1.5 para 3.1.3)</div>
-                <div>• Sector entry based on HEADING at fix, not ground track. (ENR 1.5 para 3.4.1)</div>
-                <div>• Bank angle: standard rate or max 30° (FD: 25°). (ENR 1.5 para 3.1.6)</div>
-                <div>• Obtain inbound track BEFORE crossing fix inbound. (ENR 1.5 para 3.1.5)</div>
-                <div>• Outbound WCA = 3× inbound WCA. (ENR 1.5 para 3.1.4)</div>
-                <div>• Maintain last assigned altitude unless hold clearance specifies new alt.</div>
-                <div>• DME/RNAV distance may substitute for timing where published.</div>
-                <div>• AIP ENR 1.5 is based on ICAO PANS-OPS Doc 8168.</div>
+                <div>• Standard hold = RIGHT turns. (ENR 1.5 para 3.1.3)</div>
+                <div>• Sector entry = HEADING at fix, not ground track. (para 3.4.1)</div>
+                <div>• Bank: standard rate or max 30° (FD: 25°). (para 3.1.6)</div>
+                <div>• Obtain inbound track BEFORE crossing fix. (para 3.1.5)</div>
+                <div>• Outbound WCA = 3× inbound WCA. (para 3.1.4)</div>
+                <div>• DME / RNAV distance may substitute timing where published.</div>
+                <div>• Transition altitude AU: 10,000ft · Transition level: FL110 (unless chart states).</div>
               </div>
             </Card>
-
             <Card>
-              <CardTitle icon="◈">APPROACH CATEGORY SPEEDS (TABLE 1.1)</CardTitle>
+              <CardTitle icon="◈">TABLE 1.1 APPROACH SPEEDS</CardTitle>
               <div style={{ overflowX: "auto" }}>
                 <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 10, fontFamily: "monospace" }}>
                   <thead>
                     <tr style={{ borderBottom: `1px solid ${C.border}` }}>
-                      {["Cat", "Initial Appr", "Final Appr", "Visual Circuit", "Missed Appr"].map(h => (
+                      {["Cat", "Initial", "Final", "Circling", "Missed"].map(h => (
                         <th key={h} style={{ padding: "6px 4px", color: C.textSub, textAlign: "left", letterSpacing: 1 }}>{h}</th>
                       ))}
                     </tr>
                   </thead>
                   <tbody>
-                    {[
-                      ["A", "90–150kt", "70–100kt", "100kt", "110kt"],
-                      ["B", "120–180kt", "85–130kt", "135kt", "150kt"],
-                      ["C", "160–240kt", "115–160kt", "180kt", "240kt"],
-                      ["D", "185–250kt", "130–185kt", "205kt", "265kt"],
-                      ["E", "185–250kt", "155–230kt", "240kt", "275kt"],
-                    ].map(([c, ...vals]) => (
+                    {[["A","90–150","70–100","100","110"],["B","120–180","85–130","135","150"],["C","160–240","115–160","180","240"],["D","185–250","130–185","205","265"],["E","185–250","155–230","240","275"]].map(([c,...vals]) => (
                       <tr key={c} style={{ borderBottom: `1px solid ${C.border}` }}>
                         <td style={{ padding: "6px 4px", color: C.accent, fontWeight: 700 }}>{c}</td>
-                        {vals.map((v, i) => (
-                          <td key={i} style={{ padding: "6px 4px", color: C.text }}>{v}</td>
-                        ))}
+                        {vals.map((v, i) => <td key={i} style={{ padding: "6px 4px", color: C.text }}>{v}kt</td>)}
                       </tr>
                     ))}
                   </tbody>
                 </table>
-              </div>
-              <div style={{ ...S.notesBox, marginTop: 10 }}>
-                Cat A max speed for reversal procedures: 110kt. AU AIP ENR 1.5 Table 1.1 / DAP IAL4.
               </div>
             </Card>
           </>
