@@ -1,0 +1,16 @@
+{
+  "name": "HoldMaster – AU IFR Holding Calculator",
+  "short_name": "HoldMaster",
+  "description": "Australian IFR holding pattern calculator per AIP ENR 1.5. Sector entries, wind corrections, memory bank.",
+  "start_url": "/",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#0B0D12",
+  "theme_color": "#0B0D12",
+  "categories": ["utilities", "aviation"],
+  "icons": [
+    { "src": "/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any maskable" },
+    { "src": "/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any maskable" },
+    { "src": "/icon-180.png", "sizes": "180x180", "type": "image/png" }
+  ]
+}

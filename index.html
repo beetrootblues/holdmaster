@@ -1,0 +1,43 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <!-- iOS PWA meta tags -->
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <meta name="apple-mobile-web-app-title" content="HoldMaster" />
+    <meta name="format-detection" content="telephone=no" />
+    <!-- Viewport: safe-area support for notch / Dynamic Island -->
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, viewport-fit=cover, user-scalable=no" />
+    <meta name="theme-color" content="#0B0D12" />
+    <meta name="description" content="Australian IFR Holding Pattern Calculator — AU AIP ENR 1.5 / ICAO PANS-OPS" />
+
+    <!-- PWA manifest -->
+    <link rel="manifest" href="/manifest.json" />
+
+    <!-- Apple touch icons -->
+    <link rel="apple-touch-icon" href="/icon-180.png" />
+    <link rel="apple-touch-icon" sizes="180x180" href="/icon-180.png" />
+    <link rel="icon" type="image/png" sizes="32x32" href="/icon-32.png" />
+    <link rel="icon" type="image/png" sizes="16x16" href="/icon-16.png" />
+
+    <title>HoldMaster · AU IFR</title>
+
+    <style>
+      /* iOS safe-area padding so content clears the notch / home indicator */
+      #root {
+        padding-top: env(safe-area-inset-top);
+        padding-bottom: env(safe-area-inset-bottom);
+        padding-left: env(safe-area-inset-left);
+        padding-right: env(safe-area-inset-right);
+      }
+      /* Prevent overscroll bounce revealing white background */
+      html { background: #0B0D12; overscroll-behavior: none; }
+      body { overscroll-behavior: none; }
+    </style>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.jsx"></script>
+  </body>
+</html>

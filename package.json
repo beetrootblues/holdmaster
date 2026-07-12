@@ -1,0 +1,29 @@
+{
+  "name": "holdmaster",
+  "version": "1.0.0",
+  "description": "Australian IFR Holding Pattern Calculator — AU AIP ENR 1.5 / ICAO PANS-OPS",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "@capacitor/cli": "^8.4.1",
+    "@capacitor/core": "^8.4.1",
+    "react": "^19.2.7",
+    "react-dom": "^19.2.7",
+    "vite-plugin-pwa": "^1.3.0",
+    "workbox-window": "^7.4.1"
+  },
+  "devDependencies": {
+    "@types/react": "^19.2.17",
+    "@types/react-dom": "^19.2.3",
+    "@vitejs/plugin-react": "^6.0.3",
+    "vite": "^8.1.1"
+  },
+  "keywords": ["aviation", "IFR", "holding", "CASA", "AIP", "ENR1.5"],
+  "author": "Wai Yan Moe",
+  "license": "MIT"
+}
