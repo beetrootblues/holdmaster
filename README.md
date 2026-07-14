@@ -5,7 +5,18 @@
 
 ---
 
-## What's New — v1.1.0
+## What's New — v1.4.0
+
+| | Feature |
+|---|---|
+| 📄 | **Plate Ingestion** — upload any Airservices plate (PDF/photo), Claude reads it and auto-fills the entire Approach Brief |
+| 📚 | **Plate Library** — ingested plates saved offline, tap to reload any approach instantly |
+| 📡 | **ATIS Decoder** — paste raw ATIS string, get parsed wind/QNH/ceiling/vis with go/no-go minima check |
+| ✈ | Plate ingestion auto-populates: frequencies, MSA, fix names, hold details, check heights, minima, missed approach |
+| ✈ | ATIS ceiling and visibility checked against your entered DA/MDA — green/amber/red banner |
+| ✈ | ATIS wind automatically available to Wind tab calculations |
+
+## v1.1.0
 
 | | Feature |
 |---|---|
@@ -14,8 +25,8 @@
 | ✈ | **Fuel Endurance in Hold** — laps available, endurance, fuel per lap |
 | ✈ | **VDP Calculator** — (MDA−TDZE)÷300 with timing at TAS |
 | ✈ | **ATC Phraseology** crib in Reference tab |
-| ✈ | Sector algorithm fixed for left-hand holds (BFF-mirrored geometry) |
-| ✈ | Wind calculation bug fixed (gsInbound/outbound sign error) |
+| ✈ | Sector algorithm fixed for left-hand holds |
+| ✈ | Wind calculation bug fixes |
 
 ---
 
@@ -26,113 +37,79 @@
 | **HOLD** | Inbound/outbound headings, leg timing, speed limits, wind-corrected headings, fuel endurance, hold timer, HOLD CARD kneeboard summary |
 | **SECTORS** | Live compass diagram, S1/S2/S3 sector wedges, aircraft heading overlay, step-by-step procedure |
 | **WIND** | Inbound WCA, outbound triple-WCA, adjusted outbound time, GS estimates |
-| **BRIEF** | NDB/RNP/ILS/VOR approach brief generator — frequencies, navaid, sector entry, check heights, minima, alternate, missed approach, VDP |
-| **MEMORY** | Save/load/delete holds per airport label (localStorage) |
+| **BRIEF** | NDB/RNP/ILS/VOR approach brief generator with ATIS decoder and VDP calculator |
+| **PLATES** | Upload approach plates → Claude extracts all data → auto-fills Brief tab. Offline plate library |
+| **MEMORY** | Save/load/delete holds per airport label |
 | **REF** | AIP ENR 1.5 speed tables, sector definitions, ATC phraseology, Table 1.1 approach speeds |
 
 ---
 
-## Approach Brief Generator
+## Plate Ingestion
 
-Generates a verbatim, read-back quality brief in the format used by Australian IFR operators:
+Upload any Airservices Australia approach plate — PDF page, photo, or scan. Claude's vision reads:
 
-**NDB** — navaid tuning, MSA, sector entry with station passage procedure, hold, outbound/descent track, check heights, MDA/AGL/vis, circling minima, alternate, missed approach  
-**RNP** — GNSS cross-check, IAF/IF/FAF fix names, transition track, check height table, LNAV and LNAV+VNAV minima  
-**ILS** — ILS freq/ident, G/S and LOC fail actions, check heights, DA/AGL/vis, LOC-only minima, outside-TWR-hours missed approach  
-**VOR** — VOR tuning, outbound track/time, stabilised note, check heights, MDA with/without ATIS, VOR fail action  
+- All frequencies (ATIS, TWR, APP, CTAF, PAL, CEN, SMC)
+- MSA and aerodrome elevation
+- Navaid frequency and ident
+- IAF / IF / FAF fix names
+- Hold fix, inbound track, turn direction, minimum altitude
+- Outbound track and timing
+- Check heights table
+- DA/MDA, AGL, visibility (LNAV, LNAV+VNAV, LOC-only, circling)
+- Missed approach track, altitude, procedure
+- Chart date
 
-All types include auto-derived sector entry from heading inputs, outbound timing (TW/nil wind/HW seconds), and VDP for non-precision approaches.
+Plates are stored in the local library (up to 50 plates). Tap any saved plate to instantly reload the entire brief.
+
+## ATIS Decoder
+
+Paste raw ATIS string (e.g. `YMML INFO GOLF 281750 WIND 280/12 VIS 8KM FEW030 SCT050 TEMP 14 DEW 09 QNH 1013 RWY 27`):
+
+- Parses wind direction/speed/gust, visibility, ceiling layers, QNH, temp/dew, runway in use, trend
+- Compares ceiling and visibility against your entered approach minima
+- **Green** = above minima · **Amber** = marginal · **Red** = below minima
 
 ---
 
 ## Australian AIP ENR 1.5 Rules
 
+### Sector Entry
+```
+Right hold: rel = norm(bearingFromFix − outbound)    [CW]
+Left hold:  rel = norm(outbound − bearingFromFix)    [CCW, mirrored]
+
+S3 (Direct):   rel ∈ [0°,   110°]
+S1 (Parallel): rel ∈ (110°, 290°]
+S2 (Offset):   rel ∈ (290°, 360°)
+```
+
 ### Leg Timing
-- **≤ FL140**: 1 minute outbound
-- **> FL140**: 1.5 minutes outbound  
-- **Sector 2 (offset)**: max 1.5 min regardless of chart timing
-
-### Sector Entry Algorithm
-Using bearing-from-fix (BFF) relative to outbound direction, mirrored for left holds:
-
-```
-Right hold: rel = norm(bearingFromFix − outbound)      [CW]
-Left hold:  rel = norm(outbound − bearingFromFix)      [CCW, mirrored]
-
-S3 (Direct):   rel ∈ [0°,   110°]   — 110° arc
-S1 (Parallel): rel ∈ (110°, 290°]   — 180° arc
-S2 (Offset):   rel ∈ (290°, 360°)   —  70° arc
-```
-
-Entry is based on **aircraft heading at the fix**, not ground track. (AIP ENR 1.5 para 3.4.1)
+- ≤ FL140: 1 min · > FL140: 1.5 min · S2 max: always 1.5 min
 
 ### Max Holding Speeds
-| Cat | Vat | ≤FL140 | >FL140 |
-|---|---|---|---|
-| A | ≤90kt | 170 KIAS | 170 KIAS |
-| B | 91–120kt | 170 KIAS | 220 KIAS |
-| C | 121–140kt | 230 KIAS | 240 KIAS |
-| D | 141–165kt | 230 KIAS | 240 KIAS |
-| E | 166–210kt | 230 KIAS | 240 KIAS |
+| Cat | ≤FL140 | >FL140 |
+|---|---|---|
+| A | 170 kt | 170 kt |
+| B | 170 kt | 220 kt |
+| C/D/E | 230 kt | 240 kt |
 
 ---
 
-## Sideloading on iPhone
+## Sideloading
 
-### SideStore (recommended — no PC needed after setup)
-1. Install [SideStore](https://sidestore.io)
-2. Add `HoldMaster.ipa` from [Releases](../../releases)
-3. Trust the certificate in Settings → General → VPN & Device Management
+**SideStore** (recommended) — install SideStore, add `HoldMaster.ipa` from Releases  
+**LiveContainer** — copy IPA to LiveContainer apps folder  
+**PWA** — Safari → Share → Add to Home Screen (full offline support)
 
-### LiveContainer (no signing required)
-1. Install [LiveContainer](https://github.com/khanhduytran0/LiveContainer)
-2. Copy `HoldMaster.ipa` to LiveContainer's apps folder
-3. Launch from LiveContainer
-
-### AltStore
-1. Install [AltStore](https://altstore.io)
-2. Sideload `HoldMaster.ipa` via AltStore
-
-### PWA (no sideload — add to Home Screen)
-Open in Safari → Share → **Add to Home Screen** → full offline support via service worker.
-
----
-
-## Build from Source
+## Build
 
 ```bash
-npm install
-npm run dev      # dev server
-npm run build    # production build → dist/
+npm install && npm run dev    # dev
+npm run build                 # production → dist/
 ```
 
 Node.js ≥ 18 required.
 
 ---
 
-## Project Structure
-
-```
-holdmaster/
-├── src/
-│   ├── App.jsx          # Full app — 1500+ lines, all logic + UI
-│   ├── main.jsx
-│   └── index.css
-├── public/
-│   ├── manifest.json    # PWA manifest
-│   └── icon-*.png
-├── index.html           # iOS PWA meta tags + safe-area CSS
-├── vite.config.js       # Vite + PWA plugin
-├── capacitor.config.ts  # iOS native build config
-└── HoldMaster.ipa       # Pre-built IPA
-```
-
----
-
-## Legal
-
-Not approved for operational use. Always verify against current CASA AIP, DAP charts, and your aircraft's Flight Manual. AIP ENR 1.5 © Airservices Australia.
-
-## Author
-
-CPL candidate, Moorabbin. Corrections welcome via Issues.
+*Not approved for operational use. AIP ENR 1.5 © Airservices Australia.*

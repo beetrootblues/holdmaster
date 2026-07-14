@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 
 // ─── Version ──────────────────────────────────────────────────────────────────
-const VERSION = "1.1.0";
+const VERSION = "1.4.0";
 
 // ─── AU AIP ENR 1.5 / ICAO PANS-OPS Speed Table ──────────────────────────────
 const ICAO_CATS = {
@@ -250,7 +250,97 @@ function generateBrief(b, sectorEntry, windCalc) {
   return lines.join("\n");
 }
 
-// ─── Colour palette ───────────────────────────────────────────────────────────
+// ─── ATIS Parser ─────────────────────────────────────────────────────────────
+function parseATIS(raw) {
+  if (!raw || raw.trim().length < 10) return null;
+  const s = raw.toUpperCase().trim();
+  const result = {};
+
+  // Airport ICAO
+  const icaoM = s.match(/^([A-Z]{4})\s+(?:INFO|ATIS)/);
+  if (icaoM) result.icao = icaoM[1];
+
+  // Info identifier (Alpha, Bravo, etc or A/B/C...)
+  const infoM = s.match(/INFO\s+([A-Z])/);
+  if (infoM) result.info = infoM[1];
+
+  // Time
+  const timeM = s.match(/(\d{6})Z?/);
+  if (timeM) result.time = timeM[1];
+
+  // Wind: WIND 280/12 or 28012KT or CALM
+  const windM = s.match(/WIND\s+(\d{3})\/(\d{1,3})|(\d{5})(?:G\d{2,3})?KT|CALM/);
+  if (windM) {
+    if (windM[0] === 'CALM') { result.windDir = 0; result.windSpd = 0; }
+    else if (windM[1]) { result.windDir = parseInt(windM[1]); result.windSpd = parseInt(windM[2]); }
+    else if (windM[3]) { result.windDir = parseInt(windM[3].slice(0,3)); result.windSpd = parseInt(windM[3].slice(3,5)); }
+  }
+
+  // Gust
+  const gustM = s.match(/G(\d{2,3})KT/);
+  if (gustM) result.gust = parseInt(gustM[1]);
+
+  // Visibility: VIS 8KM or 9999 or 5000M or CAVOK
+  if (s.includes('CAVOK')) { result.vis = 9999; result.cavok = true; }
+  else {
+    const visM = s.match(/VIS(?:IBILITY)?\s+(\d+(?:\.\d+)?)\s*KM|(\d{4})(?:\s|$)/);
+    if (visM) result.vis = visM[1] ? parseFloat(visM[1]) * 1000 : parseInt(visM[2]);
+  }
+
+  // Ceiling / cloud: FEW030 SCT050 BKN025 OVC010
+  const cloudM = [...s.matchAll(/(FEW|SCT|BKN|OVC)(\d{3})/g)];
+  if (cloudM.length) {
+    result.clouds = cloudM.map(m => ({ cover: m[1], alt: parseInt(m[2]) * 100 }));
+    const ceiling = cloudM.find(m => m[1] === 'BKN' || m[1] === 'OVC');
+    if (ceiling) result.ceiling = parseInt(ceiling[2]) * 100;
+  }
+
+  // Temperature / Dew point: TEMP 14 DEW 09 or 14/09
+  const tempM = s.match(/TEMP\s+(\d+)|(\d{2})\/(\d{2})(?:\s|$)/);
+  if (tempM) {
+    result.temp = tempM[1] ? parseInt(tempM[1]) : parseInt(tempM[2]);
+    if (tempM[3]) result.dew = parseInt(tempM[3]);
+  }
+  const dewM = s.match(/DEW(?:\s+POINT)?\s+(\d+)/);
+  if (dewM) result.dew = parseInt(dewM[1]);
+
+  // QNH
+  const qnhM = s.match(/QNH\s*(\d{3,4})/);
+  if (qnhM) result.qnh = parseInt(qnhM[1]);
+
+  // Runway in use
+  const rwyM = s.match(/(?:RWY|RUNWAY)\s+(\d{2}[LRC]?)/g);
+  if (rwyM) result.runways = rwyM.map(r => r.replace(/(?:RWY|RUNWAY)\s+/, ''));
+
+  // TREND
+  const trendM = s.match(/TREND\s+(NOSIG|BECMG|TEMPO)/);
+  if (trendM) result.trend = trendM[1];
+
+  // Altimeter setting note
+  if (s.includes('IN HG') || s.match(/A\d{4}/)) {
+    const altM = s.match(/A(\d{4})/);
+    if (altM) result.qnhInHg = parseInt(altM[1]) / 100;
+  }
+
+  return result;
+}
+
+function atisMinimaClear(parsed, mda, daVis) {
+  // Returns 'go' | 'no-go' | 'marginal' | null
+  if (!parsed || (!parsed.ceiling && !parsed.vis)) return null;
+  const minAlt = parseFloat(mda);
+  const minVis = parseFloat(daVis) * 1000; // convert km to m
+  if (!minAlt && !minVis) return null;
+  const ceilOk = !parsed.ceiling || parsed.ceiling > minAlt + 200;
+  const visOk  = !parsed.vis    || parsed.vis >= minVis;
+  const ceilMarginal = parsed.ceiling && parsed.ceiling > minAlt && parsed.ceiling <= minAlt + 200;
+  const visMarginal  = parsed.vis     && parsed.vis >= minVis * 0.8 && parsed.vis < minVis;
+  if (!ceilOk || !visOk) return 'no-go';
+  if (ceilMarginal || visMarginal) return 'marginal';
+  return 'go';
+}
+
+// ─── Colour palette ─────────────────────────────────────────────────────────────
 const C = {
   bg:           "#0B0D12",
   surface:      "#131620",
@@ -507,6 +597,33 @@ function ApproachBriefTab({ windCalc, sectorEntryFromCalc }) {
   });
   const [copied, setCopied]   = useState(false);
   const [preview, setPreview] = useState(false);
+  const [atisRaw, setAtisRaw]   = useState("");
+  const [atisParsed, setAtisParsed] = useState(null);
+  const [atisExpanded, setAtisExpanded] = useState(false);
+
+  // Listen for plate ingestion events from PlatesTab
+  useEffect(() => {
+    const handler = (e) => {
+      const plate = e.detail;
+      if (!plate) return;
+      setB(prev => {
+        const merged = { ...prev, ...plate };
+        try { localStorage.setItem("holdmaster_brief", JSON.stringify(merged)); } catch {}
+        return merged;
+      });
+    };
+    window.addEventListener("plate-ingested", handler);
+    return () => window.removeEventListener("plate-ingested", handler);
+  }, []);
+
+  // Parse ATIS whenever raw text changes
+  useEffect(() => {
+    if (atisRaw.trim().length > 10) {
+      setAtisParsed(parseATIS(atisRaw));
+    } else {
+      setAtisParsed(null);
+    }
+  }, [atisRaw]);
 
   const set = (key, val) => setB(prev => {
     const next = { ...prev, [key]: val };
@@ -913,6 +1030,94 @@ function ApproachBriefTab({ windCalc, sectorEntryFromCalc }) {
         )}
       </Card>
 
+      {/* ATIS Decoder */}
+      <Card>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: atisExpanded ? 12 : 0 }}>
+          <CardTitle icon="📡">ATIS DECODER</CardTitle>
+          <button
+            onClick={() => setAtisExpanded(x => !x)}
+            style={{ background: "none", border: `1px solid ${C.border}`, borderRadius: 5, color: C.textSub, cursor: "pointer", padding: "4px 10px", fontSize: 9, fontFamily: "monospace", letterSpacing: 1.5, marginBottom: 12 }}>
+            {atisExpanded ? "HIDE" : "EXPAND"}
+          </button>
+        </div>
+
+        {atisExpanded && (
+          <>
+            <div style={{ fontSize: 10, color: C.textSub, marginBottom: 8, lineHeight: 1.7 }}>
+              Paste raw ATIS string. Wind auto-fills, ceiling/vis checked against your minima.
+            </div>
+            <textarea
+              value={atisRaw}
+              onChange={e => setAtisRaw(e.target.value)}
+              placeholder={"YMML INFO GOLF 281750 WIND 280/12 VIS 8KM FEW030 SCT050 TEMP 14 DEW 09 QNH 1013 RWY 27"}
+              style={{ width: "100%", background: C.bg, border: `1px solid ${C.border}`, borderRadius: 6, color: C.text, padding: "10px 12px", fontSize: 12, fontFamily: "monospace", boxSizing: "border-box", outline: "none", resize: "vertical", minHeight: 80, lineHeight: 1.6 }}
+              onFocus={e => (e.target.style.borderColor = C.accent)}
+              onBlur={e => (e.target.style.borderColor = C.border)}
+            />
+
+            {atisParsed && (
+              <div style={{ marginTop: 10 }}>
+                {/* Minima check banner */}
+                {(() => {
+                  const minima = b.da || b.mda || b.lnavMda;
+                  const vis    = b.daVis || b.visibility || b.lnavVis;
+                  const check  = minima ? atisMinimaClear(atisParsed, minima, vis) : null;
+                  const bannerColor = check === "go" ? C.green : check === "no-go" ? C.red : check === "marginal" ? C.s2 : null;
+                  const bannerBg    = check === "go" ? C.greenDim : check === "no-go" ? C.redDim : check === "marginal" ? "#2A1A00" : null;
+                  const bannerText  = check === "go" ? "✓ ABOVE MINIMA — CONDITIONS SUITABLE" : check === "no-go" ? "✗ BELOW MINIMA — CONDITIONS NOT SUITABLE" : check === "marginal" ? "⚠ MARGINAL — CLOSE TO MINIMA" : null;
+                  return bannerColor ? (
+                    <div style={{ background: bannerBg, border: `1px solid ${bannerColor}`, borderRadius: 6, padding: "10px 12px", fontSize: 11, color: bannerColor, fontFamily: "monospace", fontWeight: 700, letterSpacing: 1, marginBottom: 10 }}>
+                      {bannerText}
+                    </div>
+                  ) : null;
+                })()}
+
+                {/* Parsed values grid */}
+                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "6px 14px", fontFamily: "monospace" }}>
+                  {[
+                    atisParsed.icao        && ["ICAO",      atisParsed.icao,                           C.accent],
+                    atisParsed.info        && ["INFO",       atisParsed.info,                            C.text],
+                    atisParsed.windDir !== undefined && ["WIND",
+                      atisParsed.windSpd === 0 ? "CALM" : `${String(atisParsed.windDir).padStart(3,"0")}°/${atisParsed.windSpd}kt${atisParsed.gust ? ` G${atisParsed.gust}kt` : ""}`,
+                      C.blue],
+                    atisParsed.vis         && ["VIS",        atisParsed.cavok ? "CAVOK" : `${atisParsed.vis >= 1000 ? (atisParsed.vis/1000).toFixed(1)+"km" : atisParsed.vis+"m"}`, atisParsed.vis >= 5000 ? C.green : atisParsed.vis >= 1500 ? C.s2 : C.red],
+                    atisParsed.ceiling     && ["CEILING",    `${atisParsed.ceiling}ft`,                 atisParsed.ceiling > 2000 ? C.green : atisParsed.ceiling > 1000 ? C.s2 : C.red],
+                    atisParsed.temp !== undefined && ["TEMP/DEW", `${atisParsed.temp}°/${atisParsed.dew ?? "?"}°`, C.text],
+                    atisParsed.qnh         && ["QNH",        `${atisParsed.qnh} hPa`,                  C.accent],
+                    atisParsed.trend       && ["TREND",      atisParsed.trend,                          atisParsed.trend === "NOSIG" ? C.green : C.s2],
+                    atisParsed.runways?.length && ["RWY IN USE", atisParsed.runways.join(", "),         C.text],
+                  ].filter(Boolean).map(([l, v, c]) => (
+                    <div key={l} style={{ display: "flex", flexDirection: "column", gap: 2 }}>
+                      <span style={{ fontSize: 8, color: C.textSub, letterSpacing: 1.5, textTransform: "uppercase" }}>{l}</span>
+                      <span style={{ fontSize: 13, fontWeight: 700, color: c }}>{v}</span>
+                    </div>
+                  ))}
+                </div>
+
+                {/* Cloud layers */}
+                {atisParsed.clouds?.length > 0 && (
+                  <div style={{ marginTop: 10, fontSize: 10, color: C.textSub, fontFamily: "monospace" }}>
+                    {atisParsed.clouds.map((cl, i) => (
+                      <span key={i} style={{ marginRight: 10, color: cl.cover === "BKN" || cl.cover === "OVC" ? C.text : C.textSub }}>
+                        {cl.cover}{String(cl.alt / 100).padStart(3, "0")}
+                      </span>
+                    ))}
+                  </div>
+                )}
+
+                {/* Auto-fill wind button */}
+                {atisParsed.windDir !== undefined && atisParsed.windSpd !== undefined && (
+                  <div style={{ marginTop: 10, fontSize: 10, color: C.textSub, fontFamily: "monospace" }}>
+                    Wind {String(atisParsed.windDir).padStart(3,"0")}°/{atisParsed.windSpd}kt detected.
+                    Wind tab auto-fills when you return to HOLD.
+                  </div>
+                )}
+              </div>
+            )}
+          </>
+        )}
+      </Card>
+
       {/* VDP Calculator */}
       {(type === "NDB" || type === "VOR") && (
         <Card>
@@ -969,7 +1174,399 @@ function ApproachBriefTab({ windCalc, sectorEntryFromCalc }) {
   );
 }
 
-// ─── Main App ─────────────────────────────────────────────────────────────────
+// ─── Plates Tab (AI Plate Ingestion) ──────────────────────────────────────────
+function PlatesTab({ onPopulateBrief }) {
+  const [status, setStatus]   = useState("idle"); // idle|loading|done|error
+  const [result, setResult]   = useState(null);
+  const [error, setError]     = useState("");
+  const [library, setLibrary] = useState(() => {
+    try { return JSON.parse(localStorage.getItem("holdmaster_plates") || "[]"); }
+    catch { return []; }
+  });
+  const [preview, setPreview] = useState(null);
+  const [libSearch, setLibSearch] = useState("");
+  const fileRef = useRef(null);
+
+  const saveLibrary = (lib) => {
+    setLibrary(lib);
+    try { localStorage.setItem("holdmaster_plates", JSON.stringify(lib)); } catch {}
+  };
+
+  const SYSTEM_PROMPT = `You are an expert Australian IFR approach plate reader. Extract ALL approach data from this Airservices Australia plate image or PDF page. Return ONLY valid JSON, no markdown, no explanation.
+
+Required JSON structure:
+{
+  "icao": "YMML",
+  "aeroName": "Melbourne",
+  "aeroElev": 434,
+  "runway": "27",
+  "approachType": "ILS",
+  "chartDate": "15 JUN 2023",
+  "msa": 3000,
+  "msaDist": 10,
+  "freqs": [
+    {"label": "ATIS", "freq": "118.5"},
+    {"label": "TWR", "freq": "120.5"}
+  ],
+  "ndbFreq": null, "ndbIdent": null,
+  "ilsFreq": "110.9", "ilsIdent": "IMML",
+  "vorFreq": null, "vorIdent": null,
+  "rnp": false,
+  "iafFix": "TESAT",
+  "ifFix": null,
+  "fafFix": "BUNDU",
+  "holdFix": "TESAT",
+  "holdInbound": 270,
+  "holdTurnDir": "R",
+  "holdAlt": 3000,
+  "holdLeg": "1 minute",
+  "outboundTrack": null,
+  "outboundTime": null,
+  "transitionTrack": null,
+  "transitionNM": null,
+  "descentFrom": 4000,
+  "descentTo": 3000,
+  "finalInbound": 270,
+  "finalTurnDir": "right",
+  "gearDist": "0.5",
+  "powerConfig": null,
+  "descentAngle": 3,
+  "checkHeights": [
+    {"fix": "BUNDU", "dme": "5.0NM", "dist": null, "alt": 2500}
+  ],
+  "da": 1200, "daAgl": 200, "daVis": "2.4",
+  "daVisNote": null,
+  "locOnlyMda": null, "locOnlyAgl": null, "locOnlyVis": null,
+  "lnavMda": null, "lnavMdaAtis": null, "lnavVis": null,
+  "lnavVnavDa": null, "lnavVnavVis": null,
+  "mda": null, "mdaAgl": null,
+  "visibility": null,
+  "circlingMda": null, "circlingVis": null,
+  "missedTurn": "left",
+  "missedTrack": 270,
+  "missedAlt": 3000,
+  "missedFix": null,
+  "missedDetail": null,
+  "alternateReqd": "no",
+  "gsFail": "continue localiser approach using check heights",
+  "locFail": "go missed and attempt alternate approach"
+}
+
+Rules:
+- Extract EXACTLY what is printed on the plate. Do not guess or invent values.
+- If a field is not on this plate, set it to null.
+- approachType must be one of: NDB, RNP, ILS, VOR
+- holdTurnDir: "R" for right, "L" for left
+- All altitudes in feet, all tracks/headings in degrees magnetic
+- freqs: include ALL frequencies shown (ATIS, AWIS, TWR, APP, CTAF, PAL, CEN, SMC, etc)
+- chartDate: format as printed on the plate
+- For RNP approaches, set rnp: true
+- missedTurn: "right" or "left"
+- descentAngle: the glidepath angle (e.g. 3.0 for 3 degrees)`;
+
+  const ingestFile = async (file) => {
+    if (!file) return;
+    setStatus("loading");
+    setError("");
+    setResult(null);
+
+    try {
+      // Convert file to base64
+      const base64 = await new Promise((res, rej) => {
+        const reader = new FileReader();
+        reader.onload = () => res(reader.result.split(",")[1]);
+        reader.onerror = () => rej(new Error("File read failed"));
+        reader.readAsDataURL(file);
+      });
+
+      const isImage = file.type.startsWith("image/");
+      const mediaType = isImage ? file.type : "application/pdf";
+
+      // Call Claude API with vision
+      const response = await fetch("https://api.anthropic.com/v1/messages", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          model: "claude-sonnet-4-6",
+          max_tokens: 2000,
+          system: SYSTEM_PROMPT,
+          messages: [{
+            role: "user",
+            content: [
+              {
+                type: isImage ? "image" : "document",
+                source: { type: "base64", media_type: mediaType, data: base64 }
+              },
+              {
+                type: "text",
+                text: "Extract all approach data from this plate and return as JSON only."
+              }
+            ]
+          }]
+        })
+      });
+
+      if (!response.ok) {
+        const errData = await response.json().catch(() => ({}));
+        throw new Error(errData.error?.message || `API error ${response.status}`);
+      }
+
+      const data = await response.json();
+      const raw = data.content?.find(b => b.type === "text")?.text || "";
+
+      // Strip any markdown fences
+      const clean = raw.replace(/```[a-z]*/g, "").replace(/```/g, "").trim();
+      const parsed = JSON.parse(clean);
+
+      // Add metadata
+      parsed._fileName = file.name;
+      parsed._ingestedAt = new Date().toISOString();
+      parsed._id = `${parsed.icao || "UNK"}_${parsed.approachType || "UNK"}_${Date.now()}`;
+
+      setResult(parsed);
+      setStatus("done");
+
+      // Add to library
+      const newLib = [parsed, ...library.filter(p => p._id !== parsed._id)].slice(0, 50);
+      saveLibrary(newLib);
+
+    } catch (err) {
+      setStatus("error");
+      setError(err.message || "Unknown error");
+    }
+  };
+
+  const handleFile = (e) => {
+    const file = e.target.files?.[0];
+    if (file) ingestFile(file);
+    e.target.value = "";
+  };
+
+  const handleDrop = (e) => {
+    e.preventDefault();
+    const file = e.dataTransfer.files?.[0];
+    if (file) ingestFile(file);
+  };
+
+  const loadPlate = (plate) => {
+    onPopulateBrief(plate);
+  };
+
+  const deletePlate = (id) => {
+    const newLib = library.filter(p => p._id !== id);
+    saveLibrary(newLib);
+    if (preview?._id === id) setPreview(null);
+  };
+
+  const filteredLib = library.filter(p =>
+    !libSearch ||
+    (p.icao || "").toLowerCase().includes(libSearch.toLowerCase()) ||
+    (p.aeroName || "").toLowerCase().includes(libSearch.toLowerCase()) ||
+    (p.approachType || "").toLowerCase().includes(libSearch.toLowerCase())
+  );
+
+  const typeColor = (t) => t === "ILS" ? C.blue : t === "RNP" ? C.purple : t === "NDB" ? C.s2 : C.green;
+
+  return (
+    <div>
+      {/* Upload zone */}
+      <Card>
+        <CardTitle icon="◈">PLATE INGESTION</CardTitle>
+        <div style={{ fontSize: 10, color: C.textSub, marginBottom: 12, lineHeight: 1.7 }}>
+          Upload any Airservices Australia approach plate — photo, scan, or PDF.
+          Claude reads it and auto-fills the Approach Brief for you.
+        </div>
+
+        {/* Drop zone */}
+        <div
+          onDrop={handleDrop}
+          onDragOver={e => e.preventDefault()}
+          onClick={() => status !== "loading" && fileRef.current?.click()}
+          style={{
+            border: `2px dashed ${status === "loading" ? C.accent : status === "done" ? C.green : status === "error" ? C.red : C.border}`,
+            borderRadius: 10, padding: "28px 16px", textAlign: "center",
+            cursor: status === "loading" ? "default" : "pointer",
+            background: status === "loading" ? C.accentGlow : C.bg,
+            transition: "all 0.2s", marginBottom: 10,
+          }}
+        >
+          {status === "idle" && (
+            <>
+              <div style={{ fontSize: 28, marginBottom: 8 }}>📄</div>
+              <div style={{ fontSize: 12, color: C.text, fontFamily: "monospace", marginBottom: 4 }}>
+                TAP TO UPLOAD PLATE
+              </div>
+              <div style={{ fontSize: 10, color: C.textSub }}>
+                PDF · JPG · PNG · HEIC · any image format
+              </div>
+            </>
+          )}
+          {status === "loading" && (
+            <>
+              <div style={{ fontSize: 22, marginBottom: 8, animation: "spin 1s linear infinite" }}>⟳</div>
+              <div style={{ fontSize: 12, color: C.accent, fontFamily: "monospace" }}>
+                READING PLATE...
+              </div>
+              <div style={{ fontSize: 10, color: C.textSub, marginTop: 4 }}>
+                Claude is extracting all approach data
+              </div>
+            </>
+          )}
+          {status === "done" && result && (
+            <>
+              <div style={{ fontSize: 22, marginBottom: 6 }}>✓</div>
+              <div style={{ fontSize: 13, color: C.green, fontFamily: "monospace", fontWeight: 700 }}>
+                {result.icao} {result.approachType} RWY {result.runway}
+              </div>
+              <div style={{ fontSize: 10, color: C.textSub, marginTop: 4 }}>
+                Tap to upload another plate
+              </div>
+            </>
+          )}
+          {status === "error" && (
+            <>
+              <div style={{ fontSize: 22, marginBottom: 6 }}>⚠</div>
+              <div style={{ fontSize: 11, color: C.red, fontFamily: "monospace", marginBottom: 4 }}>
+                INGESTION FAILED
+              </div>
+              <div style={{ fontSize: 10, color: C.textSub }}>{error}</div>
+              <div style={{ fontSize: 10, color: C.textSub, marginTop: 4 }}>Tap to try again</div>
+            </>
+          )}
+        </div>
+
+        <input ref={fileRef} type="file"
+          accept="image/*,.pdf,application/pdf"
+          onChange={handleFile}
+          style={{ display: "none" }} />
+
+        {/* Load to Brief button */}
+        {status === "done" && result && (
+          <button
+            onClick={() => loadPlate(result)}
+            style={{ width: "100%", background: C.accentDim, border: `1px solid ${C.accent}`, borderRadius: 8, color: C.accent, cursor: "pointer", padding: "14px", fontSize: 12, fontFamily: "monospace", fontWeight: 700, letterSpacing: 1.5, marginBottom: 8 }}
+          >
+            LOAD INTO APPROACH BRIEF →
+          </button>
+        )}
+
+        {/* Extracted data preview */}
+        {status === "done" && result && (
+          <div style={{ background: C.bg, border: `1px solid ${C.border}`, borderRadius: 6, padding: "12px", fontSize: 10, fontFamily: "monospace", lineHeight: 2 }}>
+            <div style={{ color: C.textSub, letterSpacing: 1.5, marginBottom: 6, fontSize: 9 }}>EXTRACTED DATA</div>
+            {[
+              ["APPROACH",  `${result.approachType} RWY ${result.runway || "?"}`],
+              ["CHART DATE", result.chartDate || "—"],
+              ["MSA",        result.msa ? `${result.msa}ft / ${result.msaDist || 10}NM` : "—"],
+              ["ELEVATION",  result.aeroElev ? `${result.aeroElev}ft` : "—"],
+              ["HOLD FIX",   result.holdFix || "—"],
+              ["INBOUND",    result.holdInbound ? `${result.holdInbound}°M ${result.holdTurnDir === "L" ? "L/H" : "R/H"}` : "—"],
+              ["HOLD ALT",   result.holdAlt ? `${result.holdAlt}ft` : "—"],
+              ["MINIMA",     result.da ? `DA ${result.da}ft / ${result.daVis || "?"}km` : result.mda ? `MDA ${result.mda}ft / ${result.visibility || "?"}km` : result.lnavMda ? `LNAV ${result.lnavMda}ft` : "—"],
+              ["MISSED",     result.missedTrack ? `${result.missedTurn?.toUpperCase() || "?"} → ${result.missedTrack}° → ${result.missedAlt}ft` : "—"],
+              ["FREQS",      result.freqs?.length ? `${result.freqs.length} frequencies` : "—"],
+              ["CHK HEIGHTS", result.checkHeights?.filter(c => c.alt)?.length ? `${result.checkHeights.filter(c => c.alt).length} points` : "—"],
+            ].map(([l, v]) => (
+              <div key={l} style={{ display: "flex", justifyContent: "space-between", borderBottom: `1px solid ${C.border}`, padding: "3px 0" }}>
+                <span style={{ color: C.textSub }}>{l}</span>
+                <span style={{ color: C.text, fontWeight: 600 }}>{v}</span>
+              </div>
+            ))}
+          </div>
+        )}
+      </Card>
+
+      {/* Plate Library */}
+      <Card>
+        <CardTitle icon="◈">PLATE LIBRARY ({library.length})</CardTitle>
+        <Input type="text" value={libSearch}
+          onChange={e => setLibSearch(e.target.value)}
+          placeholder="Search ICAO, name, type…" style={{ marginBottom: 10 }} />
+
+        {filteredLib.length === 0 && (
+          <div style={{ textAlign: "center", color: C.textMuted, padding: 20, fontSize: 12 }}>
+            {library.length === 0
+              ? "No plates ingested yet. Upload your first plate above."
+              : "No matches."}
+          </div>
+        )}
+
+        {filteredLib.map(plate => {
+          const col = typeColor(plate.approachType);
+          const minima = plate.da
+            ? `DA ${plate.da}ft / ${plate.daVis || "?"}km`
+            : plate.mda
+            ? `MDA ${plate.mda}ft / ${plate.visibility || "?"}km`
+            : plate.lnavMda
+            ? `LNAV ${plate.lnavMda}ft`
+            : "—";
+          return (
+            <div key={plate._id} style={{ background: C.surfaceRaise, border: `1px solid ${C.border}`, borderRadius: 8, padding: "11px 13px", marginBottom: 8 }}>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 6 }}>
+                <div>
+                  <span style={{ fontSize: 16, fontWeight: 700, color: C.accent, fontFamily: "monospace" }}>{plate.icao}</span>
+                  {plate.aeroName && <span style={{ fontSize: 11, color: C.textSub, marginLeft: 8 }}>{plate.aeroName}</span>}
+                </div>
+                <Pill color={col}>{plate.approachType} {plate.runway}</Pill>
+              </div>
+              <div style={{ display: "flex", gap: 5, flexWrap: "wrap", marginBottom: 8 }}>
+                {plate.holdInbound && <Pill color={C.blue}>INBOUND {plate.holdInbound}°M</Pill>}
+                {plate.holdAlt && <Pill color={C.textSub}>{plate.holdAlt}ft</Pill>}
+                {plate.holdTurnDir && <Pill color={plate.holdTurnDir === "R" ? C.green : C.s2}>{plate.holdTurnDir === "R" ? "R/H" : "L/H"}</Pill>}
+                {plate.msa && <Pill color={C.textSub}>MSA {plate.msa}ft</Pill>}
+              </div>
+              <div style={{ fontSize: 10, color: C.textSub, fontFamily: "monospace", marginBottom: 8 }}>
+                {minima} · {plate.chartDate || "No date"} · {plate.checkHeights?.filter(c => c.alt)?.length || 0} check heights
+              </div>
+              <div style={{ display: "flex", gap: 6 }}>
+                <button
+                  onClick={() => loadPlate(plate)}
+                  style={{ flex: 1, background: C.accentDim, border: `1px solid ${C.accent}`, borderRadius: 6, color: C.accent, cursor: "pointer", padding: "9px", fontSize: 10, fontFamily: "monospace", fontWeight: 700, letterSpacing: 1 }}>
+                  LOAD TO BRIEF
+                </button>
+                <button
+                  onClick={() => setPreview(preview?._id === plate._id ? null : plate)}
+                  style={{ background: C.blueDim, border: `1px solid ${C.blue}`, borderRadius: 6, color: C.blue, cursor: "pointer", padding: "9px 12px", fontSize: 10, fontFamily: "monospace" }}>
+                  {preview?._id === plate._id ? "HIDE" : "VIEW"}
+                </button>
+                <button
+                  onClick={() => deletePlate(plate._id)}
+                  style={{ background: C.redDim, border: `1px solid ${C.red}`, borderRadius: 6, color: C.red, cursor: "pointer", padding: "9px 12px", fontSize: 10, fontFamily: "monospace" }}>
+                  ✕
+                </button>
+              </div>
+
+              {/* Inline data view */}
+              {preview?._id === plate._id && (
+                <div style={{ marginTop: 10, background: C.bg, border: `1px solid ${C.border}`, borderRadius: 6, padding: "10px", fontSize: 10, fontFamily: "monospace", lineHeight: 1.9 }}>
+                  {plate.freqs?.map((f, i) => (
+                    <div key={i} style={{ display: "flex", justifyContent: "space-between", borderBottom: `1px solid ${C.border}` }}>
+                      <span style={{ color: C.textSub }}>{f.label}</span>
+                      <span style={{ color: C.accent }}>{f.freq}</span>
+                    </div>
+                  ))}
+                  {plate.checkHeights?.filter(c => c.alt)?.map((ch, i) => (
+                    <div key={i} style={{ display: "flex", justifyContent: "space-between", borderBottom: `1px solid ${C.border}` }}>
+                      <span style={{ color: C.textSub }}>{ch.fix || ch.dist ? `${ch.fix || ""} ${ch.dme || ch.dist + "NM" || ""}`.trim() : `CHK ${i+1}`}</span>
+                      <span style={{ color: C.text }}>{ch.alt}ft</span>
+                    </div>
+                  ))}
+                  {plate.missedDetail && (
+                    <div style={{ marginTop: 6, color: C.textSub }}>{plate.missedDetail}</div>
+                  )}
+                </div>
+              )}
+            </div>
+          );
+        })}
+      </Card>
+
+      <style>{`@keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }`}</style>
+    </div>
+  );
+}
+
+// ─── Main App
 export default function HoldMaster() {
   const [tab, setTab] = useState("calc");
 
@@ -1100,6 +1697,7 @@ export default function HoldMaster() {
     { id: "entry",  label: "SECTORS" },
     { id: "wind",   label: "WIND" },
     { id: "brief",  label: "BRIEF" },
+    { id: "plates", label: "PLATES" },
     { id: "memory", label: "MEMORY" },
     { id: "ref",    label: "REF" },
   ];
@@ -1441,6 +2039,16 @@ export default function HoldMaster() {
         )}
 
         {/* ── REFERENCE TAB ── */}
+        {/* ── PLATES TAB ── */}
+        {tab === "plates" && (
+          <PlatesTab onPopulateBrief={(data) => {
+            // When plate is ingested, switch to brief tab and populate
+            setTab("brief");
+            window._plateIngest = data;
+            window.dispatchEvent(new CustomEvent("plate-ingested", { detail: data }));
+          }} />
+        )}
+
         {tab === "ref" && (
           <>
             <Card>

@@ -1,6 +1,6 @@
 {
   "name": "holdmaster",
-  "version": "1.1.0",
+  "version": "1.4.0",
   "description": "Australian IFR Holding Pattern Calculator \u2014 AU AIP ENR 1.5 / ICAO PANS-OPS",
   "private": true,
   "type": "module",
