@@ -47,8 +47,31 @@ jobs:
       - name: Build web assets
         run: npm run build
 
-      - name: Sync Capacitor iOS
-        run: npx cap sync ios
+      - name: Install CocoaPods (insurance for any fallback path)
+        run: |
+          sudo gem install cocoapods -N || true
+          pod --version || echo "CocoaPods not available — expected if SPM path is used"
+
+      - name: Sync Capacitor iOS (verbose)
+        run: |
+          echo "--- Confirming SPM marker directory exists ---"
+          ls -la ios/App/CapApp-SPM || echo "WARNING: CapApp-SPM directory not found"
+          echo "--- Running cap sync with full output ---"
+          npx cap sync ios 2>&1 | tee cap-sync.log
+          SYNC_EXIT=${PIPESTATUS[0]}
+          if [ "$SYNC_EXIT" -ne 0 ]; then
+            echo "=== cap sync FAILED (exit $SYNC_EXIT) — full log above ==="
+            exit $SYNC_EXIT
+          fi
+        shell: bash
+
+      - name: Upload sync log (always, for debugging)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: cap-sync-log
+          path: cap-sync.log
+          retention-days: 14
 
       - name: Select latest stable Xcode
         uses: maxim-lobanov/setup-xcode@v1
