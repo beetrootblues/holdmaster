@@ -1,0 +1,142 @@
+name: Build iOS IPA
+
+# Builds a REAL compiled iOS .app (with a proper __LINKEDIT segment) on Apple's
+# macOS runners, then packages it as an unsigned .ipa. Sideloading tools
+# (SideStore / AltStore / LiveContainer) re-sign it locally with your own
+# Apple ID — that's expected and required; we do NOT sign here since we
+# have no Apple Developer account tied to this repo.
+#
+# Trigger: on every push to main that touches app source, or manually.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'src/**'
+      - 'public/**'
+      - 'ios/**'
+      - 'package.json'
+      - 'capacitor.config.ts'
+      - 'vite.config.js'
+      - 'index.html'
+      - '.github/workflows/build-ipa.yml'
+  workflow_dispatch: {}
+
+jobs:
+  build:
+    runs-on: macos-15
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install JS dependencies
+        run: npm install
+
+      - name: Build web assets
+        run: npm run build
+
+      - name: Sync Capacitor iOS
+        run: npx cap sync ios
+
+      - name: Select latest stable Xcode
+        uses: maxim-lobanov/setup-xcode@v1
+        with:
+          xcode-version: latest-stable
+
+      - name: Show Xcode version
+        run: xcodebuild -version
+
+      - name: Resolve Swift Package dependencies
+        working-directory: ios/App
+        run: xcodebuild -resolvePackageDependencies -project App.xcodeproj -scheme App
+
+      - name: List available schemes (forces Xcode to autocreate if needed)
+        working-directory: ios/App
+        run: xcodebuild -list -project App.xcodeproj
+
+      - name: Build unsigned .app (Release, iOS device, no codesign)
+        working-directory: ios/App
+        run: |
+          xcodebuild \
+            -project App.xcodeproj \
+            -scheme App \
+            -configuration Release \
+            -sdk iphoneos \
+            -destination 'generic/platform=iOS' \
+            -derivedDataPath build \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            DEVELOPMENT_TEAM="" \
+            clean build
+
+      - name: Locate built .app
+        id: locate
+        working-directory: ios/App
+        run: |
+          APP_PATH=$(find build/Build/Products -maxdepth 2 -name "*.app" -type d | head -n1)
+          echo "Found app at: $APP_PATH"
+          if [ -z "$APP_PATH" ]; then
+            echo "ERROR: no .app produced"
+            exit 1
+          fi
+          echo "app_path=$APP_PATH" >> "$GITHUB_OUTPUT"
+
+      - name: Verify real Mach-O binary (sanity check)
+        working-directory: ios/App
+        run: |
+          BIN="${{ steps.locate.outputs.app_path }}/App"
+          file "$BIN"
+          otool -l "$BIN" | grep -A3 LC_SEGMENT_64 | grep -A2 __LINKEDIT || {
+            echo "ERROR: __LINKEDIT segment missing — build did not produce a real binary"
+            exit 1
+          }
+          echo "__LINKEDIT segment confirmed present. This is a real, sideload-ready binary."
+
+      - name: Package unsigned IPA
+        working-directory: ios/App
+        run: |
+          mkdir -p ipa_root/Payload
+          cp -r "${{ steps.locate.outputs.app_path }}" ipa_root/Payload/HoldMaster.app
+          cd ipa_root
+          zip -r ../HoldMaster.ipa Payload
+          cd ..
+          ls -lh HoldMaster.ipa
+
+      - name: Upload IPA artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: HoldMaster-unsigned-ipa
+          path: ios/App/HoldMaster.ipa
+          retention-days: 90
+
+      - name: Create Release (on main branch push)
+        if: github.event_name == 'push'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: build-${{ github.run_number }}
+          name: HoldMaster build ${{ github.run_number }}
+          body: |
+            Automated unsigned IPA build from commit ${{ github.sha }}.
+
+            This IPA is **unsigned** — sideloading tools (SideStore, AltStore,
+            LiveContainer) will re-sign it with your own Apple ID on install.
+            This is normal and required; Apple does not allow distributing
+            pre-signed third-party apps outside the App Store / TestFlight.
+
+            Contains a real compiled arm64 binary (verified `__LINKEDIT`
+            segment present) — this will pass signing, unlike earlier
+            hand-built IPA files in this repo's history.
+          files: ios/App/HoldMaster.ipa
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

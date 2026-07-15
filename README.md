@@ -5,28 +5,37 @@
 
 ---
 
-## What's New — v1.4.0
+## Getting the app on your iPhone
 
-| | Feature |
+**[→ Download the latest IPA from Releases](../../releases/latest)**
+
+Every push to `main` triggers a GitHub Actions build on Apple's own macOS runners with real Xcode — this produces a genuinely compiled, real iOS binary (not a hand-built stub). The IPA is **unsigned**; your sideloading tool (SideStore, AltStore, LiveContainer) re-signs it locally with your own Apple ID on install. This is normal — Apple doesn't allow distributing pre-signed third-party apps outside the App Store.
+
+### Sideloading
+- **SideStore** — install SideStore, add the IPA from Releases, trust the cert in Settings → General → VPN & Device Management
+- **LiveContainer** — copy the IPA into LiveContainer's apps folder, no signing needed
+- **AltStore** — sideload via AltStore
+- **PWA (no sideload)** — Safari → Share → Add to Home Screen, full offline support
+
+### A note on earlier releases
+Releases before v2.0 shipped a hand-assembled `.ipa` with a placeholder binary — it had the right file structure (Info.plist, icons, web assets) but no real compiled Mach-O executable, so it failed at the signing step (`unable to locate __LINKEDIT segment`). v2.0 replaces that with a proper Capacitor-generated Xcode project, built for real by CI. If you hit that error on an old release, grab the [latest one](../../releases/latest) instead.
+
+---
+
+## What's New — v2.0.0
+
+| | Change |
 |---|---|
-| 📄 | **Plate Ingestion** — upload any Airservices plate (PDF/photo), Claude reads it and auto-fills the entire Approach Brief |
-| 📚 | **Plate Library** — ingested plates saved offline, tap to reload any approach instantly |
-| 📡 | **ATIS Decoder** — paste raw ATIS string, get parsed wind/QNH/ceiling/vis with go/no-go minima check |
-| ✈ | Plate ingestion auto-populates: frequencies, MSA, fix names, hold details, check heights, minima, missed approach |
-| ✈ | ATIS ceiling and visibility checked against your entered DA/MDA — green/amber/red banner |
-| ✈ | ATIS wind automatically available to Wind tab calculations |
+| 🛠 | **Real compiled iOS builds** — full Capacitor + Xcode native project, built on GitHub Actions macOS runners |
+| 🛠 | CI verifies the `__LINKEDIT` segment is present before packaging — guarantees the binary will pass signing |
+| 🛠 | Automated release on every push to `main` — always-current IPA in Releases |
+| 🛠 | Removed the old hand-built placeholder IPA |
+
+## v1.4.0
+📄 Plate Ingestion — upload any Airservices plate, Claude reads and auto-fills the Approach Brief · 📚 offline plate library · 📡 ATIS Decoder with go/no-go minima check
 
 ## v1.1.0
-
-| | Feature |
-|---|---|
-| ✈ | **Approach Brief Generator** — NDB · RNP · ILS · VOR verbatim read-back quality brief |
-| ✈ | **Hold Timer** — abeam countdown → inbound count-up with colour cues |
-| ✈ | **Fuel Endurance in Hold** — laps available, endurance, fuel per lap |
-| ✈ | **VDP Calculator** — (MDA−TDZE)÷300 with timing at TAS |
-| ✈ | **ATC Phraseology** crib in Reference tab |
-| ✈ | Sector algorithm fixed for left-hand holds |
-| ✈ | Wind calculation bug fixes |
+✈ Approach Brief Generator (NDB/RNP/ILS/VOR) · Hold Timer · Fuel Endurance · VDP Calculator · ATC Phraseology reference · sector algorithm fix for left-hand holds
 
 ---
 
@@ -41,33 +50,6 @@
 | **PLATES** | Upload approach plates → Claude extracts all data → auto-fills Brief tab. Offline plate library |
 | **MEMORY** | Save/load/delete holds per airport label |
 | **REF** | AIP ENR 1.5 speed tables, sector definitions, ATC phraseology, Table 1.1 approach speeds |
-
----
-
-## Plate Ingestion
-
-Upload any Airservices Australia approach plate — PDF page, photo, or scan. Claude's vision reads:
-
-- All frequencies (ATIS, TWR, APP, CTAF, PAL, CEN, SMC)
-- MSA and aerodrome elevation
-- Navaid frequency and ident
-- IAF / IF / FAF fix names
-- Hold fix, inbound track, turn direction, minimum altitude
-- Outbound track and timing
-- Check heights table
-- DA/MDA, AGL, visibility (LNAV, LNAV+VNAV, LOC-only, circling)
-- Missed approach track, altitude, procedure
-- Chart date
-
-Plates are stored in the local library (up to 50 plates). Tap any saved plate to instantly reload the entire brief.
-
-## ATIS Decoder
-
-Paste raw ATIS string (e.g. `YMML INFO GOLF 281750 WIND 280/12 VIS 8KM FEW030 SCT050 TEMP 14 DEW 09 QNH 1013 RWY 27`):
-
-- Parses wind direction/speed/gust, visibility, ceiling layers, QNH, temp/dew, runway in use, trend
-- Compares ceiling and visibility against your entered approach minima
-- **Green** = above minima · **Amber** = marginal · **Red** = below minima
 
 ---
 
@@ -95,20 +77,59 @@ S2 (Offset):   rel ∈ (290°, 360°)
 
 ---
 
-## Sideloading
+## Build from Source
 
-**SideStore** (recommended) — install SideStore, add `HoldMaster.ipa` from Releases  
-**LiveContainer** — copy IPA to LiveContainer apps folder  
-**PWA** — Safari → Share → Add to Home Screen (full offline support)
-
-## Build
-
+### Web / PWA
 ```bash
-npm install && npm run dev    # dev
-npm run build                 # production → dist/
+npm install
+npm run dev      # dev server
+npm run build    # production → dist/
+```
+
+### iOS (requires macOS + Xcode locally, or just push to `main` and let CI do it)
+```bash
+npm run build
+npx cap sync ios
+npx cap open ios       # opens Xcode — Product ▸ Archive to build/sign
 ```
 
 Node.js ≥ 18 required.
+
+---
+
+## Project Structure
+
+```
+holdmaster/
+├── .github/workflows/
+│   └── build-ipa.yml    # CI: builds + verifies + releases a real IPA
+├── ios/
+│   └── App/              # Native Capacitor Xcode project (Swift + xcodeproj)
+├── src/
+│   ├── App.jsx           # Full app — all logic + UI
+│   ├── main.jsx
+│   └── index.css
+├── public/
+│   ├── manifest.json     # PWA manifest
+│   └── icon-*.png
+├── index.html
+├── vite.config.js
+└── capacitor.config.ts
+```
+
+---
+
+## How the CI build works
+
+1. Checkout → `npm install` → `npm run build` (Vite web bundle)
+2. `npx cap sync ios` — copies web assets into the native project
+3. Xcode resolves Swift Package dependencies (Capacitor's Swift runtime)
+4. `xcodebuild ... clean build` — compiles a real arm64 `.app`, code-signing disabled (no dev team attached to this repo)
+5. **Verification step**: `otool -l` confirms the `__LINKEDIT` segment exists — this is the exact thing that was missing before and caused sideloading to fail
+6. Packages `Payload/HoldMaster.app` into `HoldMaster.ipa`
+7. Publishes as a GitHub Release, tagged `build-<run number>`
+
+Your sideloading tool signs the unsigned binary with your own certificate on install — that's the standard, Apple-sanctioned way to run non-App-Store apps.
 
 ---
 

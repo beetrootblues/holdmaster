@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 
 // ─── Version ──────────────────────────────────────────────────────────────────
-const VERSION = "1.4.0";
+const VERSION = "2.0.0";
 
 // ─── AU AIP ENR 1.5 / ICAO PANS-OPS Speed Table ──────────────────────────────
 const ICAO_CATS = {
