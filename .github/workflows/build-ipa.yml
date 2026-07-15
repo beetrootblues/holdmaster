@@ -16,11 +16,15 @@ on:
       - 'public/**'
       - 'ios/**'
       - 'package.json'
+      - 'package-lock.json'
       - 'capacitor.config.ts'
       - 'vite.config.js'
       - 'index.html'
       - '.github/workflows/build-ipa.yml'
   workflow_dispatch: {}
+
+permissions:
+  contents: write
 
 jobs:
   build:
