@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 
 // ─── Version ──────────────────────────────────────────────────────────────────
-const VERSION = "2.0.0";
+const VERSION = "3.0.0";
 
 // ─── AU AIP ENR 1.5 / ICAO PANS-OPS Speed Table ──────────────────────────────
 const ICAO_CATS = {
@@ -340,6 +340,144 @@ function atisMinimaClear(parsed, mda, daVis) {
   return 'go';
 }
 
+// ─── v3.0 — Weight & Balance ──────────────────────────────────────────────────
+function calcWB(items) {
+  // items: [{ name, weight, arm }]
+  let totalWeight = 0, totalMoment = 0;
+  const rows = items.map(it => {
+    const w = parseFloat(it.weight) || 0;
+    const a = parseFloat(it.arm) || 0;
+    const moment = w * a;
+    totalWeight += w;
+    totalMoment += moment;
+    return { ...it, weightNum: w, armNum: a, moment };
+  });
+  const cg = totalWeight > 0 ? totalMoment / totalWeight : 0;
+  return { rows, totalWeight, totalMoment, cg };
+}
+
+// ─── v3.0 — Performance Interpolation ────────────────────────────────────────
+function bilinearInterp(x, y, x1, x2, y1, y2, q11, q21, q12, q22) {
+  // q11=f(x1,y1), q21=f(x2,y1), q12=f(x1,y2), q22=f(x2,y2)
+  const denom = (x2 - x1) * (y2 - y1);
+  if (denom === 0) return q11;
+  const cx = Math.max(x1, Math.min(x2, x)); // clamp to table bounds
+  const cy = Math.max(y1, Math.min(y2, y));
+  const term1 = q11 * (x2 - cx) * (y2 - cy);
+  const term2 = q21 * (cx - x1) * (y2 - cy);
+  const term3 = q12 * (x2 - cx) * (cy - y1);
+  const term4 = q22 * (cx - x1) * (cy - y1);
+  return (term1 + term2 + term3 + term4) / denom;
+}
+
+function pressureAltitude(fieldElevFt, qnhHpa) {
+  return fieldElevFt + (1013.25 - qnhHpa) * 27;
+}
+
+function densityAltitude(pressureAltFt, oatC) {
+  const isaTemp = 15 - (pressureAltFt / 1000) * 1.98;
+  const isaDev = oatC - isaTemp;
+  return pressureAltFt + 120 * isaDev;
+}
+
+function isaTempAt(pressureAltFt) {
+  return 15 - (pressureAltFt / 1000) * 1.98;
+}
+
+// ─── v3.0 — NAVLOG Leg Calculation ────────────────────────────────────────────
+function calcNavLeg(track, distNM, windDir, windSpd, tas, fuelFlowPerHr) {
+  const trackRad = (track * Math.PI) / 180;
+  const windRad = (windDir * Math.PI) / 180;
+  const hw = windSpd * Math.cos(windRad - trackRad); // positive = tailwind
+  const xw = windSpd * Math.sin(windRad - trackRad);
+  const wca = Math.round(Math.atan2(xw, tas) * (180 / Math.PI));
+  const gs = Math.max(1, Math.round(Math.sqrt(Math.max(1, tas * tas - xw * xw)) + hw));
+  const timeHrs = distNM / gs;
+  const timeMin = Math.round(timeHrs * 60 * 10) / 10;
+  const fuelUsed = Math.round(fuelFlowPerHr * timeHrs * 10) / 10;
+  const heading = norm(track - wca);
+  return { wca, gs, timeMin, fuelUsed, heading, hw: Math.round(hw), xw: Math.round(xw) };
+}
+
+function fmtHM(totalMin) {
+  const h = Math.floor(totalMin / 60);
+  const m = Math.round(totalMin % 60);
+  return h > 0 ? `${h}h ${String(m).padStart(2, "0")}m` : `${m}m`;
+}
+
+// ─── v3.0 — METAR/TAF Parser ──────────────────────────────────────────────────
+function parseMETAR(raw) {
+  if (!raw || raw.trim().length < 10) return null;
+  const s = raw.toUpperCase().trim().replace(/^(METAR|SPECI)\s+/, "");
+  const result = { raw: s };
+
+  const icaoM = s.match(/^([A-Z]{4})\s/);
+  if (icaoM) result.icao = icaoM[1];
+
+  const timeM = s.match(/(\d{6})Z/);
+  if (timeM) result.time = timeM[1];
+
+  if (s.includes("CAVOK")) {
+    result.cavok = true;
+    result.vis = 9999;
+  }
+
+  const windM = s.match(/(\d{3})(\d{2,3})(?:G(\d{2,3}))?KT/) || s.match(/VRB(\d{2,3})KT/);
+  if (windM) {
+    if (s.includes("VRB")) {
+      result.windVariable = true;
+      result.windSpd = parseInt(windM[1]);
+    } else {
+      result.windDir = parseInt(windM[1]);
+      result.windSpd = parseInt(windM[2]);
+      if (windM[3]) result.gust = parseInt(windM[3]);
+    }
+  }
+
+  if (!result.cavok) {
+    const visM = s.match(/\s(\d{4})\s/);
+    if (visM) result.vis = parseInt(visM[1]);
+  }
+
+  const cloudM = [...s.matchAll(/(FEW|SCT|BKN|OVC|VV)(\d{3})(CB|TCU)?/g)];
+  if (cloudM.length) {
+    result.clouds = cloudM.map(m => ({ cover: m[1], alt: parseInt(m[2]) * 100, type: m[3] || null }));
+    const ceiling = cloudM.find(m => m[1] === "BKN" || m[1] === "OVC");
+    if (ceiling) result.ceiling = parseInt(ceiling[2]) * 100;
+  }
+
+  const tempM = s.match(/(M?\d{2})\/(M?\d{2})\s/);
+  if (tempM) {
+    result.temp = parseInt(tempM[1].replace("M", "-"));
+    result.dew = parseInt(tempM[2].replace("M", "-"));
+  }
+
+  const qnhM = s.match(/Q(\d{4})/);
+  if (qnhM) result.qnh = parseInt(qnhM[1]);
+  const altM = s.match(/A(\d{4})/);
+  if (altM && !qnhM) result.qnhInHg = parseInt(altM[1]) / 100;
+
+  const wxCodes = s.match(/\b(?:[+-]?(?:VC)?(?:MI|BC|PR|DR|BL|SH|TS|FZ)?(?:DZ|RA|SN|SG|IC|PL|GR|GS|UP|BR|FG|FU|VA|DU|SA|HZ|PY|PO|SQ|FC|SS|DS)+)\b/g);
+  if (wxCodes) result.weather = [...new Set(wxCodes)];
+
+  if (s.includes("NOSIG")) result.trend = "NOSIG";
+  else if (s.match(/\bBECMG\b/)) result.trend = "BECMG";
+  else if (s.match(/\bTEMPO\b/)) result.trend = "TEMPO";
+
+  return result;
+}
+
+function flightCategory(vis, ceiling) {
+  // Australian-style VMC/IMC categorisation (simplified, VFR/MVFR/IFR/LIFR bands)
+  if (vis === undefined && ceiling === undefined) return null;
+  const v = vis ?? 9999;
+  const c = ceiling ?? 99999;
+  if (v < 1600 || c < 500) return { cat: "LIFR", color: "#D94F4F" };
+  if (v < 5000 || c < 1000) return { cat: "IFR", color: "#E8A020" };
+  if (v < 8000 || c < 3000) return { cat: "MVFR", color: "#4D8FC9" };
+  return { cat: "VFR", color: "#3DAF76" };
+}
+
 // ─── Colour palette ─────────────────────────────────────────────────────────────
 const C = {
   bg:           "#0B0D12",
@@ -364,6 +502,12 @@ const C = {
   s1:           "#4D8FC9",
   s2:           "#E8A020",
   s3:           "#3DAF76",
+};
+
+// Module-level shared styles (used by v3.0 tab components defined outside HoldMaster)
+const S3 = {
+  warnBox:  { background: "#2A1500", border: `1px solid #7A4000`, borderRadius: 8, padding: "10px 12px", fontSize: 11, color: C.accent, marginBottom: 10, lineHeight: 1.6 },
+  notesBox: { background: C.bg, border: `1px solid ${C.border}`, borderRadius: 6, padding: "10px 12px", fontSize: 10.5, color: C.textSub, lineHeight: 1.8, marginTop: 10 },
 };
 
 // ─── SVG Holding Diagram ──────────────────────────────────────────────────────
@@ -1566,6 +1710,589 @@ Rules:
   );
 }
 
+// ─── v3.0 — Aircraft Profile Store ───────────────────────────────────────────
+function useAircraftProfiles() {
+  const [profiles, setProfiles] = useState(() => {
+    try { return JSON.parse(localStorage.getItem("holdmaster_aircraft") || "[]"); }
+    catch { return []; }
+  });
+  const [activeId, setActiveId] = useState(() => {
+    try { return localStorage.getItem("holdmaster_active_aircraft") || null; }
+    catch { return null; }
+  });
+
+  const save = (list) => {
+    setProfiles(list);
+    try { localStorage.setItem("holdmaster_aircraft", JSON.stringify(list)); } catch {}
+  };
+
+  const setActive = (id) => {
+    setActiveId(id);
+    try { localStorage.setItem("holdmaster_active_aircraft", id || ""); } catch {}
+  };
+
+  const addProfile = (profile) => {
+    const id = profile.id || `AC_${Date.now()}`;
+    const withId = { ...profile, id };
+    const next = [...profiles.filter(p => p.id !== id), withId];
+    save(next);
+    return id;
+  };
+
+  const deleteProfile = (id) => {
+    save(profiles.filter(p => p.id !== id));
+    if (activeId === id) setActive(null);
+  };
+
+  const active = profiles.find(p => p.id === activeId) || null;
+
+  return { profiles, active, activeId, setActive, addProfile, deleteProfile };
+}
+
+// ─── v3.0 — Weight & Balance Tab ──────────────────────────────────────────────
+function WBTab({ aircraft }) {
+  const defaultRows = () => aircraft?.wbStations?.length
+    ? aircraft.wbStations.map(s => ({ name: s.name, arm: s.arm, weight: "" }))
+    : [
+        { name: "Empty Weight", arm: "", weight: "" },
+        { name: "Pilot + Front Pax", arm: "", weight: "" },
+        { name: "Rear Pax", arm: "", weight: "" },
+        { name: "Fuel", arm: "", weight: "" },
+        { name: "Baggage", arm: "", weight: "" },
+      ];
+
+  const [rows, setRows] = useState(defaultRows);
+
+  useEffect(() => { setRows(defaultRows()); }, [aircraft?.id]);
+
+  const setRow = (i, field, val) => {
+    const next = [...rows];
+    next[i] = { ...next[i], [field]: val };
+    setRows(next);
+  };
+  const addRow = () => setRows([...rows, { name: "", arm: "", weight: "" }]);
+  const delRow = (i) => setRows(rows.filter((_, idx) => idx !== i));
+
+  const wb = calcWB(rows);
+  const hasData = wb.totalWeight > 0;
+
+  const mtow = parseFloat(aircraft?.mtow) || null;
+  const overMTOW = mtow && wb.totalWeight > mtow;
+  const cgMin = parseFloat(aircraft?.cgMin) || null;
+  const cgMax = parseFloat(aircraft?.cgMax) || null;
+  const cgOutOfRange = (cgMin !== null && wb.cg < cgMin) || (cgMax !== null && wb.cg > cgMax);
+
+  return (
+    <div>
+      {!aircraft && (
+        <Card style={{ borderColor: C.s2 }}>
+          <div style={{ fontSize: 11, color: C.s2, lineHeight: 1.7 }}>
+            ⚠ No aircraft profile selected. Set one up in the AIRCRAFT tab for arms/limits to auto-fill.
+            You can still use this tab manually.
+          </div>
+        </Card>
+      )}
+
+      <Card>
+        <CardTitle icon="◈">STATIONS</CardTitle>
+        {rows.map((r, i) => {
+          const moment = (parseFloat(r.weight) || 0) * (parseFloat(r.arm) || 0);
+          return (
+            <div key={i} style={{ display: "flex", gap: 6, marginBottom: 8, alignItems: "flex-end" }}>
+              <div style={{ flex: 1.4 }}>
+                <Label>Station</Label>
+                <Input type="text" value={r.name} onChange={e => setRow(i, "name", e.target.value)} placeholder="Baggage" />
+              </div>
+              <div style={{ flex: 1 }}>
+                <Label>Weight</Label>
+                <Input value={r.weight} onChange={e => setRow(i, "weight", e.target.value)} placeholder="0" />
+              </div>
+              <div style={{ flex: 1 }}>
+                <Label>Arm (in)</Label>
+                <Input value={r.arm} onChange={e => setRow(i, "arm", e.target.value)} placeholder="0" />
+              </div>
+              <div style={{ flex: 1.1, fontSize: 10, color: C.textSub, paddingBottom: 10, textAlign: "right", fontFamily: "monospace" }}>
+                {moment ? moment.toFixed(0) : "—"}
+              </div>
+              <button onClick={() => delRow(i)} style={{ background: C.redDim, border: `1px solid ${C.red}`, borderRadius: 6, color: C.red, cursor: "pointer", padding: "9px 11px", fontFamily: "monospace" }}>✕</button>
+            </div>
+          );
+        })}
+        <button onClick={addRow} style={{ background: C.surfaceRaise, border: `1px solid ${C.border}`, borderRadius: 6, color: C.textSub, cursor: "pointer", padding: "8px 14px", fontSize: 11, fontFamily: "monospace", width: "100%" }}>+ ADD STATION</button>
+      </Card>
+
+      {hasData && (
+        <Card style={{ borderColor: (overMTOW || cgOutOfRange) ? C.red : C.green + "44" }}>
+          <CardTitle icon="◈">RESULT</CardTitle>
+          <DataRow label="TOTAL WEIGHT" value={`${wb.totalWeight.toFixed(1)} lb`} valueColor={overMTOW ? C.red : C.text} large />
+          {mtow && <DataRow label="MTOW" value={`${mtow} lb`} valueColor={C.textSub} />}
+          {mtow && <DataRow label="MARGIN" value={`${(mtow - wb.totalWeight).toFixed(1)} lb`} valueColor={overMTOW ? C.red : C.green} />}
+          <DataRow label="TOTAL MOMENT" value={wb.totalMoment.toFixed(0)} />
+          <DataRow label="CG" value={`${wb.cg.toFixed(2)} in`} valueColor={cgOutOfRange ? C.red : C.accent} large />
+          {(cgMin !== null || cgMax !== null) && (
+            <DataRow label="CG LIMITS" value={`${cgMin ?? "?"} – ${cgMax ?? "?"} in`} valueColor={C.textSub} />
+          )}
+          {overMTOW && <div style={S3.warnBox}>⚠ OVER MAX TAKEOFF WEIGHT by {(wb.totalWeight - mtow).toFixed(1)} lb</div>}
+          {cgOutOfRange && <div style={S3.warnBox}>⚠ CG OUTSIDE APPROVED LIMITS</div>}
+          {!overMTOW && !cgOutOfRange && (mtow || cgMin) && (
+            <div style={{ background: C.greenDim, border: `1px solid ${C.green}`, borderRadius: 6, padding: "8px 12px", fontSize: 11, color: C.green, fontFamily: "monospace", fontWeight: 700 }}>
+              ✓ WITHIN LIMITS
+            </div>
+          )}
+        </Card>
+      )}
+    </div>
+  );
+}
+
+// ─── v3.0 — Performance Tab ───────────────────────────────────────────────────
+function PerfTab({ aircraft }) {
+  const [fieldElev, setFieldElev] = useState("");
+  const [qnh, setQnh] = useState("1013");
+  const [oat, setOat] = useState("");
+  const [weight, setWeight] = useState("");
+  const [mode, setMode] = useState("takeoff"); // takeoff | landing
+
+  const chart = mode === "takeoff" ? aircraft?.takeoffChart : aircraft?.landingChart;
+
+  const fe = parseFloat(fieldElev), q = parseFloat(qnh), o = parseFloat(oat), w = parseFloat(weight);
+  const hasInputs = !isNaN(fe) && !isNaN(q) && !isNaN(o);
+
+  const pa = hasInputs ? pressureAltitude(fe, q) : null;
+  const da = hasInputs ? densityAltitude(pa, o) : null;
+  const isaDev = hasInputs ? (o - isaTempAt(pa)).toFixed(1) : null;
+
+  // Chart is a simple 2-point table: { paLow, paHigh, tempLow, tempHigh, distLowLow, distHighLow, distLowHigh, distHighHigh }
+  let interpDist = null;
+  if (chart && hasInputs && chart.paLow !== undefined) {
+    interpDist = bilinearInterp(
+      pa, o,
+      parseFloat(chart.paLow), parseFloat(chart.paHigh),
+      parseFloat(chart.tempLow), parseFloat(chart.tempHigh),
+      parseFloat(chart.distLowLow), parseFloat(chart.distHighLow),
+      parseFloat(chart.distLowHigh), parseFloat(chart.distHighHigh)
+    );
+  }
+
+  return (
+    <div>
+      <Card>
+        <CardTitle icon="◈">CONDITIONS</CardTitle>
+        <div style={{ display: "flex", gap: 8, marginBottom: 10 }}>
+          <SegBtn active={mode === "takeoff"} onClick={() => setMode("takeoff")}>TAKEOFF</SegBtn>
+          <SegBtn active={mode === "landing"} onClick={() => setMode("landing")}>LANDING</SegBtn>
+        </div>
+        <div style={{ display: "flex", gap: 10, marginBottom: 10 }}>
+          <div style={{ flex: 1 }}><Label>Field Elevation (ft)</Label><Input value={fieldElev} onChange={e => setFieldElev(e.target.value)} placeholder="435" /></div>
+          <div style={{ flex: 1 }}><Label>QNH (hPa)</Label><Input value={qnh} onChange={e => setQnh(e.target.value)} placeholder="1013" /></div>
+        </div>
+        <div style={{ display: "flex", gap: 10, marginBottom: 10 }}>
+          <div style={{ flex: 1 }}><Label>OAT (°C)</Label><Input value={oat} onChange={e => setOat(e.target.value)} placeholder="25" /></div>
+          <div style={{ flex: 1 }}><Label>Weight (lb, opt)</Label><Input value={weight} onChange={e => setWeight(e.target.value)} placeholder="2208" /></div>
+        </div>
+      </Card>
+
+      {hasInputs && (
+        <Card>
+          <CardTitle icon="◈">ATMOSPHERIC</CardTitle>
+          <DataRow label="PRESSURE ALTITUDE" value={`${Math.round(pa)} ft`} valueColor={C.accent} large />
+          <DataRow label="DENSITY ALTITUDE" value={`${Math.round(da)} ft`} valueColor={da > (fe + 3000) ? C.red : da > (fe + 1500) ? C.s2 : C.green} large />
+          <DataRow label="ISA DEVIATION" value={`${isaDev > 0 ? "+" : ""}${isaDev}°C`} />
+          <div style={S3.notesBox}>
+            <div>• DA {'>'} field elev + 3000ft: significant performance degradation expected.</div>
+            <div>• Always cross-check against your POH chart directly — this is an estimate.</div>
+          </div>
+        </Card>
+      )}
+
+      {interpDist !== null && (
+        <Card style={{ borderColor: C.accent + "44" }}>
+          <CardTitle icon="◈">{mode === "takeoff" ? "TAKEOFF GROUND ROLL (EST)" : "LANDING GROUND ROLL (EST)"}</CardTitle>
+          <DataRow label="INTERPOLATED DISTANCE" value={`${Math.round(interpDist)} ft`} valueColor={C.accent} large />
+          <div style={S3.notesBox}>
+            Bilinear interpolation from your saved {mode} chart corner values. Verify against the actual POH before flight.
+          </div>
+        </Card>
+      )}
+
+      {!chart && hasInputs && (
+        <Card>
+          <div style={{ fontSize: 11, color: C.textSub, lineHeight: 1.7 }}>
+            No {mode} performance chart saved for this aircraft. Add corner values (2 pressure altitudes × 2 temperatures) in the AIRCRAFT tab to enable distance interpolation.
+          </div>
+        </Card>
+      )}
+    </div>
+  );
+}
+
+// ─── v3.0 — Aircraft Tab (profile editor) ─────────────────────────────────────
+function AircraftTab({ aircraftHook }) {
+  const { profiles, active, activeId, setActive, addProfile, deleteProfile } = aircraftHook;
+  const [editing, setEditing] = useState(null); // profile being edited, or null
+
+  const blank = () => ({
+    id: null, tail: "", type: "", mtow: "", cgMin: "", cgMax: "",
+    wbStations: [
+      { name: "Empty Weight", arm: "" },
+      { name: "Pilot + Front Pax", arm: "" },
+      { name: "Rear Pax", arm: "" },
+      { name: "Fuel", arm: "" },
+      { name: "Baggage", arm: "" },
+    ],
+    cruiseTas: "", fuelFlow: "", fuelUnit: "L",
+    takeoffChart: { paLow: "0", paHigh: "2000", tempLow: "15", tempHigh: "35", distLowLow: "", distHighLow: "", distLowHigh: "", distHighHigh: "" },
+    landingChart: { paLow: "0", paHigh: "2000", tempLow: "15", tempHigh: "35", distLowLow: "", distHighLow: "", distLowHigh: "", distHighHigh: "" },
+  });
+
+  const startNew = () => setEditing(blank());
+  const startEdit = (p) => setEditing({ ...blank(), ...p });
+  const cancel = () => setEditing(null);
+
+  const saveEditing = () => {
+    if (!editing.tail.trim()) return;
+    const id = addProfile(editing);
+    setActive(id);
+    setEditing(null);
+  };
+
+  const setField = (field, val) => setEditing(prev => ({ ...prev, [field]: val }));
+  const setStation = (i, field, val) => {
+    const stations = [...editing.wbStations];
+    stations[i] = { ...stations[i], [field]: val };
+    setField("wbStations", stations);
+  };
+  const addStation = () => setField("wbStations", [...editing.wbStations, { name: "", arm: "" }]);
+  const delStation = (i) => setField("wbStations", editing.wbStations.filter((_, idx) => idx !== i));
+
+  const setChart = (chartKey, field, val) => {
+    setEditing(prev => ({ ...prev, [chartKey]: { ...prev[chartKey], [field]: val } }));
+  };
+
+  if (editing) {
+    return (
+      <div>
+        <Card>
+          <CardTitle icon="◈">AIRCRAFT DETAILS</CardTitle>
+          <div style={{ display: "flex", gap: 10, marginBottom: 10 }}>
+            <div style={{ flex: 1 }}><Label>Tail Number</Label><Input type="text" value={editing.tail} onChange={e => setField("tail", e.target.value.toUpperCase())} placeholder="VH-ABC" /></div>
+            <div style={{ flex: 1 }}><Label>Type</Label><Input type="text" value={editing.type} onChange={e => setField("type", e.target.value)} placeholder="C172S" /></div>
+          </div>
+          <div style={{ display: "flex", gap: 10, marginBottom: 10 }}>
+            <div style={{ flex: 1 }}><Label>MTOW (lb)</Label><Input value={editing.mtow} onChange={e => setField("mtow", e.target.value)} placeholder="2550" /></div>
+            <div style={{ flex: 1 }}><Label>CG Min (in)</Label><Input value={editing.cgMin} onChange={e => setField("cgMin", e.target.value)} placeholder="35.0" /></div>
+            <div style={{ flex: 1 }}><Label>CG Max (in)</Label><Input value={editing.cgMax} onChange={e => setField("cgMax", e.target.value)} placeholder="47.3" /></div>
+          </div>
+          <div style={{ display: "flex", gap: 10 }}>
+            <div style={{ flex: 1 }}><Label>Cruise TAS (kt)</Label><Input value={editing.cruiseTas} onChange={e => setField("cruiseTas", e.target.value)} placeholder="110" /></div>
+            <div style={{ flex: 1 }}><Label>Fuel Flow (per hr)</Label><Input value={editing.fuelFlow} onChange={e => setField("fuelFlow", e.target.value)} placeholder="32" /></div>
+            <div style={{ flex: 1 }}>
+              <Label>Unit</Label>
+              <div style={{ display: "flex", gap: 6 }}>
+                <SegBtn active={editing.fuelUnit === "L"} onClick={() => setField("fuelUnit", "L")}>L</SegBtn>
+                <SegBtn active={editing.fuelUnit === "kg"} onClick={() => setField("fuelUnit", "kg")}>KG</SegBtn>
+              </div>
+            </div>
+          </div>
+        </Card>
+
+        <Card>
+          <CardTitle icon="◈">W&B STATIONS (ARMS)</CardTitle>
+          <div style={{ fontSize: 10, color: C.textSub, marginBottom: 10 }}>Set each station's arm once — weight is entered per-flight in the WB tab.</div>
+          {editing.wbStations.map((s, i) => (
+            <div key={i} style={{ display: "flex", gap: 8, marginBottom: 6, alignItems: "flex-end" }}>
+              <div style={{ flex: 1.5 }}><Label>Station</Label><Input type="text" value={s.name} onChange={e => setStation(i, "name", e.target.value)} placeholder="Baggage" /></div>
+              <div style={{ flex: 1 }}><Label>Arm (in)</Label><Input value={s.arm} onChange={e => setStation(i, "arm", e.target.value)} placeholder="95.0" /></div>
+              <button onClick={() => delStation(i)} style={{ background: C.redDim, border: `1px solid ${C.red}`, borderRadius: 6, color: C.red, cursor: "pointer", padding: "9px 11px", fontFamily: "monospace" }}>✕</button>
+            </div>
+          ))}
+          <button onClick={addStation} style={{ background: C.surfaceRaise, border: `1px solid ${C.border}`, borderRadius: 6, color: C.textSub, cursor: "pointer", padding: "8px 14px", fontSize: 11, fontFamily: "monospace", width: "100%" }}>+ ADD STATION</button>
+        </Card>
+
+        {["takeoffChart", "landingChart"].map(chartKey => (
+          <Card key={chartKey}>
+            <CardTitle icon="◈">{chartKey === "takeoffChart" ? "TAKEOFF" : "LANDING"} CHART (OPTIONAL)</CardTitle>
+            <div style={{ fontSize: 10, color: C.textSub, marginBottom: 10, lineHeight: 1.6 }}>
+              Enter ground roll distance (ft) at 4 corner points from your POH: low/high pressure altitude × low/high temperature.
+            </div>
+            <div style={{ display: "flex", gap: 8, marginBottom: 8 }}>
+              <div style={{ flex: 1 }}><Label>PA Low (ft)</Label><Input value={editing[chartKey].paLow} onChange={e => setChart(chartKey, "paLow", e.target.value)} /></div>
+              <div style={{ flex: 1 }}><Label>PA High (ft)</Label><Input value={editing[chartKey].paHigh} onChange={e => setChart(chartKey, "paHigh", e.target.value)} /></div>
+            </div>
+            <div style={{ display: "flex", gap: 8, marginBottom: 8 }}>
+              <div style={{ flex: 1 }}><Label>Temp Low (°C)</Label><Input value={editing[chartKey].tempLow} onChange={e => setChart(chartKey, "tempLow", e.target.value)} /></div>
+              <div style={{ flex: 1 }}><Label>Temp High (°C)</Label><Input value={editing[chartKey].tempHigh} onChange={e => setChart(chartKey, "tempHigh", e.target.value)} /></div>
+            </div>
+            <div style={{ fontSize: 9, color: C.textMuted, marginBottom: 6, letterSpacing: 1 }}>DISTANCES (ft) AT EACH CORNER</div>
+            <div style={{ display: "flex", gap: 8, marginBottom: 8 }}>
+              <div style={{ flex: 1 }}><Label>PA Low / Temp Low</Label><Input value={editing[chartKey].distLowLow} onChange={e => setChart(chartKey, "distLowLow", e.target.value)} placeholder="725" /></div>
+              <div style={{ flex: 1 }}><Label>PA High / Temp Low</Label><Input value={editing[chartKey].distHighLow} onChange={e => setChart(chartKey, "distHighLow", e.target.value)} placeholder="850" /></div>
+            </div>
+            <div style={{ display: "flex", gap: 8 }}>
+              <div style={{ flex: 1 }}><Label>PA Low / Temp High</Label><Input value={editing[chartKey].distLowHigh} onChange={e => setChart(chartKey, "distLowHigh", e.target.value)} placeholder="850" /></div>
+              <div style={{ flex: 1 }}><Label>PA High / Temp High</Label><Input value={editing[chartKey].distHighHigh} onChange={e => setChart(chartKey, "distHighHigh", e.target.value)} placeholder="1000" /></div>
+            </div>
+          </Card>
+        ))}
+
+        <div style={{ display: "flex", gap: 8 }}>
+          <button onClick={saveEditing} style={{ flex: 1, background: C.accentDim, border: `1px solid ${C.accent}`, borderRadius: 8, color: C.accent, cursor: "pointer", padding: "14px", fontSize: 12, fontFamily: "monospace", fontWeight: 700, letterSpacing: 1.5 }}>SAVE PROFILE</button>
+          <button onClick={cancel} style={{ background: C.surfaceHigh, border: `1px solid ${C.border}`, borderRadius: 8, color: C.textSub, cursor: "pointer", padding: "14px 18px", fontSize: 12, fontFamily: "monospace" }}>CANCEL</button>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div>
+      <Card>
+        <CardTitle icon="✈">AIRCRAFT PROFILES</CardTitle>
+        <div style={{ fontSize: 10, color: C.textSub, marginBottom: 12, lineHeight: 1.7 }}>
+          Save arms, limits, cruise performance, and takeoff/landing charts once per aircraft. Select an active aircraft to auto-fill WB and Performance tabs.
+        </div>
+        <button onClick={startNew} style={{ width: "100%", background: C.accentDim, border: `1px solid ${C.accent}`, borderRadius: 8, color: C.accent, cursor: "pointer", padding: "12px", fontSize: 11, fontFamily: "monospace", fontWeight: 700, letterSpacing: 1.5 }}>+ NEW AIRCRAFT PROFILE</button>
+      </Card>
+
+      {profiles.length === 0 && (
+        <Card><div style={{ textAlign: "center", color: C.textMuted, padding: 20, fontSize: 12 }}>No aircraft profiles yet.</div></Card>
+      )}
+
+      {profiles.map(p => (
+        <div key={p.id} style={{
+          background: activeId === p.id ? C.accentDim : C.surfaceRaise,
+          border: `1px solid ${activeId === p.id ? C.accent : C.border}`,
+          borderRadius: 8, padding: "12px 14px", marginBottom: 8,
+        }}>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 8 }}>
+            <div>
+              <div style={{ fontSize: 16, fontWeight: 700, color: activeId === p.id ? C.accent : C.text, fontFamily: "monospace" }}>{p.tail}</div>
+              <div style={{ fontSize: 11, color: C.textSub }}>{p.type}</div>
+            </div>
+            {activeId === p.id && <Pill color={C.accent}>ACTIVE</Pill>}
+          </div>
+          <div style={{ display: "flex", gap: 5, flexWrap: "wrap", marginBottom: 10 }}>
+            {p.mtow && <Pill color={C.textSub}>MTOW {p.mtow}lb</Pill>}
+            {p.cruiseTas && <Pill color={C.blue}>{p.cruiseTas}kt cruise</Pill>}
+            {p.fuelFlow && <Pill color={C.green}>{p.fuelFlow}{p.fuelUnit}/hr</Pill>}
+          </div>
+          <div style={{ display: "flex", gap: 6 }}>
+            {activeId !== p.id
+              ? <button onClick={() => setActive(p.id)} style={{ flex: 1, background: C.accentDim, border: `1px solid ${C.accent}`, borderRadius: 6, color: C.accent, cursor: "pointer", padding: "9px", fontSize: 10, fontFamily: "monospace", fontWeight: 700 }}>SET ACTIVE</button>
+              : <button onClick={() => setActive(null)} style={{ flex: 1, background: C.surfaceHigh, border: `1px solid ${C.border}`, borderRadius: 6, color: C.textSub, cursor: "pointer", padding: "9px", fontSize: 10, fontFamily: "monospace" }}>DEACTIVATE</button>
+            }
+            <button onClick={() => startEdit(p)} style={{ background: C.blueDim, border: `1px solid ${C.blue}`, borderRadius: 6, color: C.blue, cursor: "pointer", padding: "9px 14px", fontSize: 10, fontFamily: "monospace" }}>EDIT</button>
+            <button onClick={() => deleteProfile(p.id)} style={{ background: C.redDim, border: `1px solid ${C.red}`, borderRadius: 6, color: C.red, cursor: "pointer", padding: "9px 14px", fontSize: 10, fontFamily: "monospace" }}>✕</button>
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+// ─── v3.0 — NAVLOG Tab ────────────────────────────────────────────────────────
+function NavLogTab({ aircraft }) {
+  const [legs, setLegs] = useState(() => {
+    try { return JSON.parse(localStorage.getItem("holdmaster_navlog") || "[]"); }
+    catch { return []; }
+  });
+  const [tas, setTas] = useState(() => aircraft?.cruiseTas || "");
+  const [fuelFlow, setFuelFlow] = useState(() => aircraft?.fuelFlow || "");
+  const [startFuel, setStartFuel] = useState("");
+
+  useEffect(() => {
+    if (aircraft?.cruiseTas && !tas) setTas(aircraft.cruiseTas);
+    if (aircraft?.fuelFlow && !fuelFlow) setFuelFlow(aircraft.fuelFlow);
+  }, [aircraft?.id]);
+
+  const saveLegs = (next) => {
+    setLegs(next);
+    try { localStorage.setItem("holdmaster_navlog", JSON.stringify(next)); } catch {}
+  };
+
+  const addLeg = () => saveLegs([...legs, { from: "", to: "", track: "", dist: "", windDir: "", windSpd: "" }]);
+  const setLeg = (i, field, val) => {
+    const next = [...legs];
+    next[i] = { ...next[i], [field]: val };
+    saveLegs(next);
+  };
+  const delLeg = (i) => saveLegs(legs.filter((_, idx) => idx !== i));
+  const clearAll = () => saveLegs([]);
+
+  const tasN = parseFloat(tas) || 0;
+  const ffN = parseFloat(fuelFlow) || 0;
+  const startFuelN = parseFloat(startFuel) || 0;
+
+  let cumTime = 0, cumFuel = 0, cumDist = 0;
+  const computed = legs.map(leg => {
+    const track = parseFloat(leg.track), dist = parseFloat(leg.dist);
+    const wd = parseFloat(leg.windDir) || 0, ws = parseFloat(leg.windSpd) || 0;
+    if (isNaN(track) || isNaN(dist) || !tasN) return { ...leg, invalid: true };
+    const calc = calcNavLeg(track, dist, wd, ws, tasN, ffN);
+    cumTime += calc.timeMin;
+    cumFuel += calc.fuelUsed;
+    cumDist += dist;
+    return { ...leg, ...calc, cumTime, cumFuel, cumDist };
+  });
+
+  const validLegs = computed.filter(l => !l.invalid);
+  const totalTime = validLegs.length ? validLegs[validLegs.length - 1].cumTime : 0;
+  const totalFuel = validLegs.length ? validLegs[validLegs.length - 1].cumFuel : 0;
+  const totalDist = validLegs.length ? validLegs[validLegs.length - 1].cumDist : 0;
+  const fuelRemaining = startFuelN - totalFuel;
+
+  return (
+    <div>
+      <Card>
+        <CardTitle icon="◈">FLIGHT PARAMETERS</CardTitle>
+        <div style={{ display: "flex", gap: 10, marginBottom: 10 }}>
+          <div style={{ flex: 1 }}><Label>TAS (kt)</Label><Input value={tas} onChange={e => setTas(e.target.value)} placeholder="110" /></div>
+          <div style={{ flex: 1 }}><Label>Fuel Flow (/hr)</Label><Input value={fuelFlow} onChange={e => setFuelFlow(e.target.value)} placeholder="32" /></div>
+          <div style={{ flex: 1 }}><Label>Start Fuel</Label><Input value={startFuel} onChange={e => setStartFuel(e.target.value)} placeholder="150" /></div>
+        </div>
+        {aircraft && <div style={{ fontSize: 9, color: C.textMuted }}>Defaults from active aircraft: {aircraft.tail}</div>}
+      </Card>
+
+      <Card>
+        <CardTitle icon="◈">LEGS</CardTitle>
+        {computed.map((leg, i) => (
+          <div key={i} style={{ background: C.bg, border: `1px solid ${C.border}`, borderRadius: 8, padding: "10px 12px", marginBottom: 8 }}>
+            <div style={{ display: "flex", gap: 6, marginBottom: 8 }}>
+              <div style={{ flex: 1 }}><Label>From</Label><Input type="text" value={leg.from} onChange={e => setLeg(i, "from", e.target.value.toUpperCase())} placeholder="YMMB" /></div>
+              <div style={{ flex: 1 }}><Label>To</Label><Input type="text" value={leg.to} onChange={e => setLeg(i, "to", e.target.value.toUpperCase())} placeholder="YMAV" /></div>
+              <button onClick={() => delLeg(i)} style={{ background: C.redDim, border: `1px solid ${C.red}`, borderRadius: 6, color: C.red, cursor: "pointer", padding: "9px 11px", fontFamily: "monospace", alignSelf: "flex-end" }}>✕</button>
+            </div>
+            <div style={{ display: "flex", gap: 6, marginBottom: 8 }}>
+              <div style={{ flex: 1 }}><Label>Track (°M)</Label><Input value={leg.track} onChange={e => setLeg(i, "track", e.target.value)} placeholder="270" /></div>
+              <div style={{ flex: 1 }}><Label>Dist (NM)</Label><Input value={leg.dist} onChange={e => setLeg(i, "dist", e.target.value)} placeholder="35" /></div>
+              <div style={{ flex: 1 }}><Label>Wind Dir</Label><Input value={leg.windDir} onChange={e => setLeg(i, "windDir", e.target.value)} placeholder="250" /></div>
+              <div style={{ flex: 1 }}><Label>Wind Spd</Label><Input value={leg.windSpd} onChange={e => setLeg(i, "windSpd", e.target.value)} placeholder="15" /></div>
+            </div>
+            {!leg.invalid && leg.gs !== undefined && (
+              <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 6, fontFamily: "monospace", paddingTop: 8, borderTop: `1px solid ${C.border}` }}>
+                {[
+                  ["HDG", `${leg.heading}°M`, C.accent],
+                  ["GS", `${leg.gs}kt`, C.blue],
+                  ["TIME", fmtHM(leg.timeMin), C.text],
+                  ["FUEL", leg.fuelUsed, C.s2],
+                ].map(([l, v, c]) => (
+                  <div key={l} style={{ textAlign: "center" }}>
+                    <div style={{ fontSize: 8, color: C.textSub, letterSpacing: 1 }}>{l}</div>
+                    <div style={{ fontSize: 12, fontWeight: 700, color: c }}>{v}</div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        ))}
+        <div style={{ display: "flex", gap: 8 }}>
+          <button onClick={addLeg} style={{ flex: 1, background: C.surfaceRaise, border: `1px solid ${C.border}`, borderRadius: 6, color: C.textSub, cursor: "pointer", padding: "10px 14px", fontSize: 11, fontFamily: "monospace" }}>+ ADD LEG</button>
+          {legs.length > 0 && <button onClick={clearAll} style={{ background: C.redDim, border: `1px solid ${C.red}`, borderRadius: 6, color: C.red, cursor: "pointer", padding: "10px 14px", fontSize: 11, fontFamily: "monospace" }}>CLEAR</button>}
+        </div>
+      </Card>
+
+      {validLegs.length > 0 && (
+        <Card style={{ borderColor: C.accent + "44", background: C.surfaceHigh }}>
+          <CardTitle icon="✈">TOTALS</CardTitle>
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "8px 16px", fontFamily: "monospace" }}>
+            {[
+              ["TOTAL DIST", `${totalDist.toFixed(0)} NM`, C.text],
+              ["TOTAL TIME", fmtHM(totalTime), C.accent],
+              ["TOTAL FUEL", `${totalFuel.toFixed(1)} ${aircraft?.fuelUnit || ""}`, C.s2],
+              ...(startFuelN > 0 ? [["FUEL REMAINING", `${fuelRemaining.toFixed(1)} ${aircraft?.fuelUnit || ""}`, fuelRemaining < startFuelN * 0.2 ? C.red : C.green]] : []),
+            ].map(([l, v, c]) => (
+              <div key={l} style={{ display: "flex", flexDirection: "column", gap: 2 }}>
+                <span style={{ fontSize: 8, color: C.textSub, letterSpacing: 1.5, textTransform: "uppercase" }}>{l}</span>
+                <span style={{ fontSize: 15, fontWeight: 700, color: c }}>{v}</span>
+              </div>
+            ))}
+          </div>
+        </Card>
+      )}
+    </div>
+  );
+}
+
+// ─── v3.0 — METAR/TAF Tab ─────────────────────────────────────────────────────
+function WxTab() {
+  const [raw, setRaw] = useState("");
+  const parsed = raw.trim().length > 10 ? parseMETAR(raw) : null;
+  const cat = parsed ? flightCategory(parsed.vis, parsed.ceiling) : null;
+
+  return (
+    <div>
+      <Card>
+        <CardTitle icon="📡">METAR DECODER</CardTitle>
+        <div style={{ fontSize: 10, color: C.textSub, marginBottom: 10, lineHeight: 1.7 }}>
+          Paste a raw METAR. Fully offline — no network required.
+        </div>
+        <textarea
+          value={raw}
+          onChange={e => setRaw(e.target.value)}
+          placeholder="YSSY 231400Z 25012KT 9999 FEW030 22/15 Q1018 NOSIG"
+          style={{ width: "100%", background: C.bg, border: `1px solid ${C.border}`, borderRadius: 6, color: C.text, padding: "10px 12px", fontSize: 12, fontFamily: "monospace", boxSizing: "border-box", outline: "none", resize: "vertical", minHeight: 70, lineHeight: 1.6 }}
+        />
+      </Card>
+
+      {parsed && (
+        <>
+          {cat && (
+            <Card style={{ borderColor: cat.color }}>
+              <div style={{ textAlign: "center", padding: "8px 0" }}>
+                <div style={{ fontSize: 28, fontWeight: 700, color: cat.color, fontFamily: "monospace", letterSpacing: 3 }}>{cat.cat}</div>
+                <div style={{ fontSize: 10, color: C.textSub, marginTop: 4 }}>
+                  {parsed.cavok ? "CAVOK" : `Vis ${parsed.vis}m${parsed.ceiling ? ` · Ceiling ${parsed.ceiling}ft` : ""}`}
+                </div>
+              </div>
+            </Card>
+          )}
+
+          <Card>
+            <CardTitle icon="◈">DECODED</CardTitle>
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "8px 16px", fontFamily: "monospace" }}>
+              {[
+                parsed.icao && ["ICAO", parsed.icao, C.accent],
+                parsed.time && ["TIME", `${parsed.time.slice(0,2)}${parsed.time.slice(2,4)}:${parsed.time.slice(4,6)}Z`, C.text],
+                parsed.windDir !== undefined && ["WIND", parsed.windVariable ? `VRB/${parsed.windSpd}kt` : `${String(parsed.windDir).padStart(3,"0")}°/${parsed.windSpd}kt${parsed.gust ? ` G${parsed.gust}` : ""}`, C.blue],
+                parsed.vis !== undefined && ["VIS", parsed.cavok ? "CAVOK" : `${parsed.vis}m`, C.text],
+                parsed.ceiling && ["CEILING", `${parsed.ceiling}ft`, parsed.ceiling > 2000 ? C.green : parsed.ceiling > 1000 ? C.s2 : C.red],
+                parsed.temp !== undefined && ["TEMP/DEW", `${parsed.temp}°/${parsed.dew}°`, C.text],
+                parsed.qnh && ["QNH", `${parsed.qnh} hPa`, C.accent],
+                parsed.trend && ["TREND", parsed.trend, C.text],
+                parsed.weather?.length && ["WX", parsed.weather.join(" "), C.s2],
+              ].filter(Boolean).map(([l, v, c]) => (
+                <div key={l} style={{ display: "flex", flexDirection: "column", gap: 2 }}>
+                  <span style={{ fontSize: 8, color: C.textSub, letterSpacing: 1.5, textTransform: "uppercase" }}>{l}</span>
+                  <span style={{ fontSize: 13, fontWeight: 700, color: c }}>{v}</span>
+                </div>
+              ))}
+            </div>
+            {parsed.clouds?.length > 0 && (
+              <div style={{ marginTop: 10, paddingTop: 10, borderTop: `1px solid ${C.border}`, fontSize: 10, color: C.textSub, fontFamily: "monospace" }}>
+                {parsed.clouds.map((cl, i) => (
+                  <span key={i} style={{ marginRight: 12, color: cl.cover === "BKN" || cl.cover === "OVC" ? C.text : C.textSub }}>
+                    {cl.cover}{String(cl.alt / 100).padStart(3, "0")}{cl.type || ""}
+                  </span>
+                ))}
+              </div>
+            )}
+          </Card>
+        </>
+      )}
+
+      <Card>
+        <CardTitle icon="◈">FLIGHT CATEGORY BANDS</CardTitle>
+        <div style={S3.notesBox}>
+          <div>• VFR: vis ≥8000m, ceiling ≥3000ft</div>
+          <div>• MVFR: vis ≥5000m, ceiling ≥1000ft</div>
+          <div>• IFR: vis ≥1600m, ceiling ≥500ft</div>
+          <div>• LIFR: below IFR minimums</div>
+          <div style={{ marginTop: 6, color: C.textMuted }}>Simplified bands for quick reference — always check current AIP for regulatory minima.</div>
+        </div>
+      </Card>
+    </div>
+  );
+}
+
 // ─── Main App
 export default function HoldMaster() {
   const [tab, setTab] = useState("calc");
@@ -1594,6 +2321,9 @@ export default function HoldMaster() {
   });
   const [memSearch, setMemSearch] = useState("");
   const [deleteConfirm, setDeleteConfirm] = useState(null);
+
+  // v3.0 — Aircraft profiles (shared across NAVLOG, W&B, PERF tabs)
+  const aircraftHook = useAircraftProfiles();
 
   useEffect(() => {
     try { localStorage.setItem("holdmaster_v2", JSON.stringify(memories)); }
@@ -1672,8 +2402,8 @@ export default function HoldMaster() {
   const S = {
     app:      { background: C.bg, minHeight: "100vh", color: C.text, fontFamily: "'SF Mono','Fira Mono',Consolas,monospace", fontSize: 13, paddingBottom: 60 },
     header:   { background: C.surface, borderBottom: `1px solid ${C.border}`, padding: "16px 16px 12px", display: "flex", justifyContent: "space-between", alignItems: "center" },
-    tabs:     { display: "flex", borderBottom: `1px solid ${C.border}`, background: C.surface, overflowX: "auto" },
-    tab:   (a) => ({ flex: 1, padding: "12px 8px", cursor: "pointer", fontSize: 8.5, letterSpacing: 1.8, fontFamily: "monospace", fontWeight: a ? 700 : 400, color: a ? C.accent : C.textSub, borderBottom: a ? `2px solid ${C.accent}` : "2px solid transparent", background: "none", border: "none", borderBottom: a ? `2px solid ${C.accent}` : "2px solid transparent", whiteSpace: "nowrap" }),
+    tabs:     { display: "flex", borderBottom: `1px solid ${C.border}`, background: C.surface, overflowX: "auto", scrollSnapType: "x proximity", WebkitOverflowScrolling: "touch" },
+    tab:   (a) => ({ flex: "0 0 auto", minWidth: 64, padding: "12px 10px", cursor: "pointer", fontSize: 8.5, letterSpacing: 1.8, fontFamily: "monospace", fontWeight: a ? 700 : 400, color: a ? C.accent : C.textSub, borderBottom: a ? `2px solid ${C.accent}` : "2px solid transparent", background: "none", border: "none", borderBottom: a ? `2px solid ${C.accent}` : "2px solid transparent", whiteSpace: "nowrap" }),
     body:     { padding: "14px", maxWidth: 500, margin: "0 auto" },
     row2:     { display: "flex", gap: 10, marginBottom: 10 },
     field:    { flex: 1, display: "flex", flexDirection: "column" },
@@ -1693,13 +2423,18 @@ export default function HoldMaster() {
   };
 
   const TABS = [
-    { id: "calc",   label: "HOLD" },
-    { id: "entry",  label: "SECTORS" },
-    { id: "wind",   label: "WIND" },
-    { id: "brief",  label: "BRIEF" },
-    { id: "plates", label: "PLATES" },
-    { id: "memory", label: "MEMORY" },
-    { id: "ref",    label: "REF" },
+    { id: "calc",     label: "HOLD" },
+    { id: "entry",    label: "SECTORS" },
+    { id: "wind",     label: "WIND" },
+    { id: "brief",    label: "BRIEF" },
+    { id: "plates",   label: "PLATES" },
+    { id: "navlog",   label: "NAVLOG" },
+    { id: "wb",       label: "W&B" },
+    { id: "perf",     label: "PERF" },
+    { id: "wx",       label: "WX" },
+    { id: "aircraft", label: "AIRCRAFT" },
+    { id: "memory",   label: "MEMORY" },
+    { id: "ref",      label: "REF" },
   ];
 
   return (
@@ -2048,6 +2783,21 @@ export default function HoldMaster() {
             window.dispatchEvent(new CustomEvent("plate-ingested", { detail: data }));
           }} />
         )}
+
+        {/* ── NAVLOG TAB (v3.0) ── */}
+        {tab === "navlog" && <NavLogTab aircraft={aircraftHook.active} />}
+
+        {/* ── WEIGHT & BALANCE TAB (v3.0) ── */}
+        {tab === "wb" && <WBTab aircraft={aircraftHook.active} />}
+
+        {/* ── PERFORMANCE TAB (v3.0) ── */}
+        {tab === "perf" && <PerfTab aircraft={aircraftHook.active} />}
+
+        {/* ── WEATHER (METAR) TAB (v3.0) ── */}
+        {tab === "wx" && <WxTab />}
+
+        {/* ── AIRCRAFT PROFILES TAB (v3.0) ── */}
+        {tab === "aircraft" && <AircraftTab aircraftHook={aircraftHook} />}
 
         {tab === "ref" && (
           <>

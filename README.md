@@ -22,6 +22,23 @@ Releases before v2.0 shipped a hand-assembled `.ipa` with a placeholder binary �
 
 ---
 
+## What's New — v3.0.0
+
+Flight-planning tools, not just holding patterns — six new tabs, all fully offline.
+
+| | Feature |
+|---|---|
+| ✈ | **AIRCRAFT** — save tail number, W&B arms, cruise TAS/fuel flow, and takeoff/landing charts once per aircraft |
+| ✈ | **W&B** — station-by-station weight & balance, moment/CG calculation, MTOW and CG-limit checking with pass/fail status |
+| ✈ | **PERF** — takeoff/landing distance via bilinear interpolation across your saved POH chart corners, plus pressure altitude / density altitude / ISA deviation |
+| ✈ | **NAVLOG** — leg-by-leg route planner: track, distance, wind → heading, groundspeed, time, fuel burn, running totals, fuel remaining |
+| ✈ | **WX** — fully offline METAR decoder: wind, visibility, cloud/ceiling, temp/dew, QNH, weather codes, trend, VFR/MVFR/IFR/LIFR categorisation |
+| 🛠 | Aircraft profiles feed defaults into NAVLOG, W&B, and PERF automatically — set up once, use everywhere |
+| 🛠 | Every formula (W&B moment/CG, density altitude, bilinear interpolation, wind-corrected leg calc) independently verified against textbook/training reference values before shipping |
+| 🛠 | Fixed a tab-bar layout bug where 12 tabs would squash into the viewport instead of scrolling |
+
+All v3.0 calculations are fully offline — no network dependency, no external data source. Enter your own POH/AFM numbers once per aircraft and they're reused for every flight.
+
 ## What's New — v2.0.0
 
 | | Change |
@@ -48,6 +65,11 @@ Releases before v2.0 shipped a hand-assembled `.ipa` with a placeholder binary �
 | **WIND** | Inbound WCA, outbound triple-WCA, adjusted outbound time, GS estimates |
 | **BRIEF** | NDB/RNP/ILS/VOR approach brief generator with ATIS decoder and VDP calculator |
 | **PLATES** | Upload approach plates → Claude extracts all data → auto-fills Brief tab. Offline plate library |
+| **NAVLOG** | Leg-by-leg route planner — track/distance/wind → heading, GS, time, fuel, running totals |
+| **W&B** | Station weight & balance, moment/CG, MTOW and CG-limit checking |
+| **PERF** | Takeoff/landing distance interpolation, pressure/density altitude, ISA deviation |
+| **WX** | Offline METAR decoder with VFR/MVFR/IFR/LIFR categorisation |
+| **AIRCRAFT** | Save per-aircraft W&B arms, cruise performance, and POH charts — reused across NAVLOG/W&B/PERF |
 | **MEMORY** | Save/load/delete holds per airport label |
 | **REF** | AIP ENR 1.5 speed tables, sector definitions, ATC phraseology, Table 1.1 approach speeds |
 
